@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import gspread
-import json
 import time
 import xlsxwriter
 import io
@@ -22,30 +21,26 @@ SCOPES = [
 
 st.set_page_config(page_title="천안공장 HACCP", layout="wide")
 
-# --- 2. 구글 연동 함수 (디버깅 버전) ---
+# --- 2. 구글 연동 함수 (TOML 방식) ---
 @st.cache_resource
 def connect_google():
-    # [디버깅] 금고에 무슨 키가 있는지 확인 (내용은 안 보여주고 이름만 확인)
+    # [수정됨] json.loads 삭제! 이제 금고에서 바로 꺼내 씁니다.
     if "google_key_json" not in st.secrets:
-        st.error("🚨 오류: 'google_key_json'이라는 이름표를 찾을 수 없습니다!")
-        st.warning(f"현재 금고에 있는 이름표들: {list(st.secrets.keys())}")
-        st.info("Secrets 맨 첫 줄이 'google_key_json = \"\"\"' 로 시작하는지 확인하세요.")
+        st.error("🚨 오류: Secrets에 'google_key_json' 항목이 없습니다.")
         st.stop()
 
     try:
-        # JSON 변환 시도
-        key_dict = json.loads(st.secrets["google_key_json"])
+        # dict(st.secrets[...])로 바로 변환
+        key_dict = dict(st.secrets["google_key_json"])
+        
         creds = service_account.Credentials.from_service_account_info(
             key_dict, scopes=SCOPES
         )
         gc = gspread.authorize(creds)
         drive_service = build('drive', 'v3', credentials=creds)
         return gc, drive_service
-    except json.JSONDecodeError as e:
-        st.error(f"🚨 JSON 형식 오류: 복사/붙여넣기가 잘못되었습니다. ({e})")
-        st.stop()
     except Exception as e:
-        st.error(f"🚨 인증 오류 발생: {e}")
+        st.error(f"🚨 인증 오류: {e}")
         st.stop()
 
 @st.cache_data(ttl=10)
@@ -180,7 +175,6 @@ try:
     gc, drive_service = connect_google()
     df = load_data(gc)
 except Exception as e:
-    # 여기가 핵심! 이제 그냥 멈추지 않고 상세 에러를 보여줌
     st.error(f"❌ 접속 중단: {e}")
     st.stop()
 
