@@ -13,8 +13,11 @@ from googleapiclient.http import MediaIoBaseUpload
 
 # --- 1. 환경 설정 ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1BcMaaKnZG9q4qabwR1moRiE_QyC04jU3dZYR7grHQsc/edit?gid=0#gid=0"
-DRIVE_FOLDER_ID = "117a_UMGDl6YoF8J32a6Y3uwkvl30JClG"
-# [핵심] .file을 뺀 'drive' 권한 (모든 파일 보기)
+
+# 👇 [중요] 구글 드라이브 폴더 주소창 맨 뒤에 있는 ID와 똑같은지 꼭 확인하세요!
+DRIVE_FOLDER_ID = "117a_UMGDl6YoF8J32a6Y3uwkvl30JClG" 
+
+# [권한 설정] .file을 뺀 'drive' 권한 (업로드/다운로드/삭제 모두 가능)
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
@@ -22,15 +25,18 @@ SCOPES = [
 
 st.set_page_config(page_title="천안공장 HACCP", layout="wide")
 
-# --- 2. 구글 연동 함수 (이름을 바꿔서 캐시 강제 초기화!) ---
+# --- 2. 구글 연동 함수 (최종버전: 캐시 강제 초기화) ---
 @st.cache_resource
-def connect_google_new():
+def connect_google_final():
+    # Secrets에 키가 있는지 확인
     if "google_key_json" not in st.secrets:
         st.error("🚨 오류: Secrets 설정이 없습니다.")
         st.stop()
 
     try:
+        # Secrets에서 키 가져오기
         key_dict = dict(st.secrets["google_key_json"])
+        
         creds = service_account.Credentials.from_service_account_info(
             key_dict, scopes=SCOPES
         )
@@ -67,33 +73,32 @@ def load_data(_gc):
         st.error(f"데이터 로딩 실패: {e}")
         return pd.DataFrame()
 
-# [수정됨] 사진 다운로드 실패 시 '이유'를 알려주는 함수
+# [공통] 사진 다운로드 함수
 @st.cache_data(show_spinner=False)
 def download_image_bytes(_drive_service, file_link):
     if not isinstance(file_link, str) or "drive.google.com" not in file_link:
-        return None, "링크 아님"
+        return None
         
     try:
-        # 파일 ID 추출 시도
         if "/d/" in file_link:
             file_id = file_link.split("/d/")[1].split("/")[0]
         elif "id=" in file_link:
             file_id = file_link.split("id=")[1].split("&")[0]
         else:
-            return None, "ID 찾기 실패"
+            return None
 
-        # 다운로드 실행
-        image_data = _drive_service.files().get_media(fileId=file_id).execute()
-        return image_data, None # 성공 시 (데이터, 에러없음) 반환
-    except Exception as e:
-        return None, str(e) # 실패 시 (없음, 에러메시지) 반환
+        # 이미지 데이터 가져오기
+        return _drive_service.files().get_media(fileId=file_id).execute()
+    except:
+        return None
 
+# [공통] 이미지 압축 (용량 줄이기)
 def compress_image(uploaded_file):
     try:
         image = Image.open(uploaded_file)
-        image = ImageOps.exif_transpose(image)
+        image = ImageOps.exif_transpose(image) # 회전 방지
         image = image.convert('RGB')
-        image.thumbnail((1024, 1024))
+        image.thumbnail((1024, 1024)) # 사이즈 줄이기
         output = io.BytesIO()
         image.save(output, format='JPEG', quality=70)
         output.seek(0)
@@ -103,9 +108,11 @@ def compress_image(uploaded_file):
     except Exception as e:
         return uploaded_file
 
+# [공통] 사진 업로드
 def upload_photo(drive_service, uploaded_file):
     if uploaded_file is None: return ""
     compressed_file = compress_image(uploaded_file)
+    # 파일 이름에 날짜 시간 붙여서 중복 방지
     file_metadata = {'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}", 'parents': [DRIVE_FOLDER_ID]}
     media = MediaIoBaseUpload(compressed_file, mimetype='image/jpeg')
     file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
@@ -178,9 +185,9 @@ def process_and_upload(gc, uploaded_file):
     else: ws.append_rows(final_df.values.tolist())
     st.success(f"✅ 총 {len(final_df)}건 업로드 완료!")
 
-# --- 3. 메인 앱 ---
+# --- 3. 메인 앱 실행 ---
 try:
-    gc, drive_service = connect_google_new() # [중요] 새 함수 이름 사용
+    gc, drive_service = connect_google_final() # [중요] 함수 이름 변경됨
     df = load_data(gc)
 except Exception as e:
     st.error(f"❌ 접속 중단: {e}")
@@ -290,15 +297,13 @@ if menu == "📊 대시보드":
                 with c_1:
                     st.caption("❌ 전")
                     if r['사진_전']: 
-                        img, err = download_image_bytes(drive_service, r['사진_전'])
+                        img = download_image_bytes(drive_service, r['사진_전'])
                         if img: st.image(img, use_container_width=True)
-                        else: st.warning(f"로딩 실패: {err}")
                 with c_2:
                     st.caption("✅ 후")
                     if r['사진_후']: 
-                        img, err = download_image_bytes(drive_service, r['사진_후'])
+                        img = download_image_bytes(drive_service, r['사진_후'])
                         if img: st.image(img, use_container_width=True)
-                        else: st.warning(f"로딩 실패: {err}")
                 with c_3:
                     st.markdown(f"**내용:** {r['개선 필요사항']}")
                     st.markdown(f"**담당:** {r['담당자']}")
@@ -345,9 +350,9 @@ elif menu == "🛠️ 조치 입력":
             with c1:
                 st.caption("📸 개선 전")
                 if target_row['사진_전']:
-                    img, err = download_image_bytes(drive_service, target_row['사진_전'])
+                    img = download_image_bytes(drive_service, target_row['사진_전'])
                     if img: st.image(img, use_container_width=True)
-                    else: st.error(f"사진 못 가져옴: {err}")
+                    else: st.error("사진을 불러오지 못했습니다.")
             with c2:
                 st.markdown(f"**장소:** {target_row['공정']} / **담당:** {target_row['담당자']}")
                 st.info(target_row['개선 필요사항'])
