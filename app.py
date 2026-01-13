@@ -1,3 +1,4 @@
+import altair as alt
 import streamlit as st
 import pandas as pd
 import time
@@ -422,6 +423,72 @@ if menu == "📊 대시보드":
         m4.metric("개선율", f"{rate:.1f}%")
 
         st.divider()
+# ---- (그래프/순위) 복구 ----
+st.subheader("📈 요약 그래프")
+
+# 월을 여러 개 선택하면 월별, 아니면 공정(장소)별로 보여주기
+if len(selected_months) > 1:
+    group_col, x_title = "Month", "월"
+    # Month가 숫자라 Altair에서 보기 좋게 문자열로 변환
+    dff["_grp"] = dff["Month"].astype(int).astype(str) + "월"
+else:
+    group_col, x_title = "공정", "장소"
+    dff["_grp"] = dff["공정"].astype(str)
+
+chart_df = (
+    dff.groupby("_grp")
+       .agg(
+            총발생=("ID", "count"),
+            조치완료=("진행상태", lambda x: (x == "완료").sum())
+        )
+       .reset_index()
+)
+
+chart_df["진행률"] = (chart_df["조치완료"] / chart_df["총발생"] * 100).fillna(0).round(1)
+chart_df["라벨"] = chart_df["진행률"].astype(str) + "%"
+
+c1, c2 = st.columns(2)
+
+with c1:
+    st.markdown(f"**🔴 총 발생 건수 ({x_title}별)**")
+    chart1 = (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("_grp:N", axis=alt.Axis(labelAngle=0, title=None)),
+            y=alt.Y("총발생:Q"),
+            tooltip=["_grp", "총발생"]
+        )
+    )
+    st.altair_chart(chart1, use_container_width=True)
+
+with c2:
+    st.markdown("**🟢 조치 완료율 (%)**")
+    base = alt.Chart(chart_df).encode(
+        x=alt.X("_grp:N", axis=alt.Axis(labelAngle=0, title=None)),
+        y=alt.Y("진행률:Q", scale=alt.Scale(domain=[0, 100]))
+    )
+    bars = base.mark_bar()
+    text = base.mark_text(dy=-12).encode(text="라벨:N")
+    st.altair_chart(bars + text, use_container_width=True)
+
+st.divider()
+
+# 장소별 개선율 순위
+st.markdown("**🏆 장소별 개선율 순위**")
+loc_stats = (
+    dff.groupby("공정")["진행상태"]
+       .apply(lambda x: (x == "완료").mean() * 100)
+       .reset_index(name="개선율(%)")
+)
+loc_stats["개선율(%)"] = loc_stats["개선율(%)"].round(1)
+
+st.dataframe(
+    loc_stats.sort_values("개선율(%)", ascending=False),
+    hide_index=True,
+    use_container_width=True
+)
+# ---- (그래프/순위) 복구 끝 ----
 
         # 최근 10건
         st.subheader("📋 최근 10건")
