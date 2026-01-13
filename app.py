@@ -14,10 +14,10 @@ from googleapiclient.http import MediaIoBaseUpload
 # --- 1. 환경 설정 ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1BcMaaKnZG9q4qabwR1moRiE_QyC04jU3dZYR7grHQsc/edit?gid=0#gid=0"
 
-# 👇 [중요] 구글 드라이브 폴더 주소창 맨 뒤에 있는 ID와 똑같은지 꼭 확인하세요!
+# 👇 [중요] 구글 드라이브 폴더 주소창 맨 뒤에 있는 ID
 DRIVE_FOLDER_ID = "117a_UMGDl6YoF8J32a6Y3uwkvl30JClG" 
 
-# [권한 설정] .file을 뺀 'drive' 권한 (업로드/다운로드/삭제 모두 가능)
+# [권한 설정]
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
@@ -25,7 +25,7 @@ SCOPES = [
 
 st.set_page_config(page_title="천안공장 HACCP", layout="wide")
 
-# --- 2. 구글 연동 함수 (최종버전: 캐시 강제 초기화) ---
+# --- 2. 구글 연동 함수 ---
 @st.cache_resource
 def connect_google_final():
     # Secrets에 키가 있는지 확인
@@ -36,6 +36,9 @@ def connect_google_final():
     try:
         # Secrets에서 키 가져오기
         key_dict = dict(st.secrets["google_key_json"])
+        
+        # 👇 [추가됨] 화면 왼쪽에 로봇 이름을 표시합니다 (권한 확인용)
+        st.sidebar.warning(f"🤖 현재 로봇 ID: {key_dict.get('client_email')}")
         
         creds = service_account.Credentials.from_service_account_info(
             key_dict, scopes=SCOPES
@@ -92,7 +95,7 @@ def download_image_bytes(_drive_service, file_link):
     except:
         return None
 
-# [공통] 이미지 압축 (용량 줄이기)
+# [공통] 이미지 압축 (용량 줄이기) - Pillow 라이브러리 필요
 def compress_image(uploaded_file):
     try:
         image = Image.open(uploaded_file)
@@ -102,10 +105,12 @@ def compress_image(uploaded_file):
         output = io.BytesIO()
         image.save(output, format='JPEG', quality=70)
         output.seek(0)
+        # 객체 속성 복구
         output.name = uploaded_file.name
         output.type = 'image/jpeg'
         return output
     except Exception as e:
+        st.warning(f"이미지 압축 실패(원본 사용): {e}")
         return uploaded_file
 
 # [공통] 사진 업로드
@@ -187,7 +192,7 @@ def process_and_upload(gc, uploaded_file):
 
 # --- 3. 메인 앱 실행 ---
 try:
-    gc, drive_service = connect_google_final() # [중요] 함수 이름 변경됨
+    gc, drive_service = connect_google_final() 
     df = load_data(gc)
 except Exception as e:
     st.error(f"❌ 접속 중단: {e}")
@@ -365,19 +370,21 @@ elif menu == "🛠️ 조치 입력":
                 if st.form_submit_button("완료 저장"):
                     if not atxt: st.warning("내용 입력!")
                     else:
-                        with st.spinner('저장 중...'):
-                            lnk = upload_photo(drive_service, aph) if aph else ""
-                            sh = gc.open_by_url(SPREADSHEET_URL)
-                            ws = sh.sheet1
-                            try:
+                        try:
+                            with st.spinner('저장 중...'):
+                                lnk = upload_photo(drive_service, aph) if aph else ""
+                                sh = gc.open_by_url(SPREADSHEET_URL)
+                                ws = sh.sheet1
                                 cell = ws.find(str(selected_id))
                                 ws.update_cell(cell.row, 7, atxt) 
                                 ws.update_cell(cell.row, 8, adt.strftime('%Y-%m-%d'))
                                 ws.update_cell(cell.row, 6, '완료')
                                 if lnk: ws.update_cell(cell.row, 10, lnk)
-                                st.balloons()
-                                st.success("저장 완료!")
-                                time.sleep(2)
-                                st.rerun()
-                            except: st.error("오류 발생")
+                            st.balloons()
+                            st.success("저장 완료!")
+                            time.sleep(2)
+                            st.rerun()
+                        except Exception as e:
+                            # 🚨 여기가 중요합니다! 무슨 에러인지 보여줍니다.
+                            st.error(f"상세 에러 내용: {e}")
     else: st.info("조치할 항목이 없습니다.")
