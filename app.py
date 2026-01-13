@@ -5,12 +5,12 @@ import io
 import json
 import re
 import urllib.request
-import base64
+# import base64
 from datetime import datetime, date
 from PIL import Image, ImageOps
 
 import altair as alt
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 
 import gspread
 from google.oauth2 import service_account
