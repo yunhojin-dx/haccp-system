@@ -1,7 +1,9 @@
-streamlit==1.52.2
-pandas==2.2.3
-supabase==2.7.4
-pillow==11.1.0
-requests==2.32.3
-matplotlib==3.10.0
-xlsxwriter==3.2.2
+streamlit
+pandas
+altair
+supabase
+requests
+Pillow
+xlsxwriter
+pyarrow
+openpyxl
