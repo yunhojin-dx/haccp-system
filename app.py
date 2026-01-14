@@ -647,3 +647,163 @@ elif menu == "🧾 보고서/출력":
             file_name=filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+        # =========================
+# CSV → Supabase 마이그레이션
+# =========================
+import re
+
+def extract_drive_file_id(link: str) -> str | None:
+    if not isinstance(link, str) or "drive.google.com" not in link:
+        return None
+    # /d/<id>/
+    m = re.search(r"/d/([^/]+)", link)
+    if m:
+        return m.group(1)
+    # id=<id>
+    m = re.search(r"id=([^&]+)", link)
+    if m:
+        return m.group(1)
+    return None
+
+def download_drive_file_public(link: str) -> bytes | None:
+    """
+    Drive 파일이 '링크가 있는 사람 공개'면 uc?export=download 로 받는 방식이 꽤 잘 됨.
+    공개가 아니면 403/HTML 반환 -> None
+    """
+    file_id = extract_drive_file_id(link)
+    if not file_id:
+        return None
+
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    try:
+        r = requests.get(url, timeout=20)
+        if r.status_code != 200:
+            return None
+        # 공개가 아니면 HTML이 올 때가 많음
+        ct = (r.headers.get("content-type") or "").lower()
+        if "text/html" in ct and len(r.content) < 200000:
+            return None
+        return r.content
+    except Exception:
+        return None
+
+def map_status(s: str) -> str:
+    s = (s or "").strip()
+    if s in ["완료", "진행중", "계획수립"]:
+        return s
+    # 혹시 다른 값이 있으면 기본 진행중
+    return "진행중"
+
+def try_parse_plan_due(x: str) -> str | None:
+    if x is None:
+        return None
+    t = str(x).strip()
+    if not t:
+        return None
+    t = t.replace(".", "-").replace("/", "-")
+    try:
+        return pd.to_datetime(t, errors="coerce").date().strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+def migrate_csv_to_supabase(csv_file) -> None:
+    df = pd.read_csv(csv_file)
+    if df.empty:
+        st.warning("CSV가 비어있습니다.")
+        return
+
+    required_cols = ["일시", "공정", "개선 필요사항", "담당자", "진행상태"]
+    for c in required_cols:
+        if c not in df.columns:
+            st.error(f"CSV 필수 컬럼 누락: {c}")
+            return
+
+    progress = st.progress(0)
+    ok_cnt, fail_cnt, photo_fail_cnt = 0, 0, 0
+
+    for i, r in df.iterrows():
+        try:
+            issue_date = None
+            try:
+                issue_date = pd.to_datetime(str(r.get("일시","")).strip(), errors="coerce").date()
+            except Exception:
+                issue_date = None
+
+            status = map_status(str(r.get("진행상태","")))
+            reporter = str(r.get("발견자","") if "발견자" in df.columns else "").strip()
+
+            payload = {
+                "issue_date": issue_date.strftime("%Y-%m-%d") if issue_date else None,
+                "location": str(r.get("공정","")).strip(),
+                "issue_text": str(r.get("개선 필요사항","")).strip(),
+                "reporter": reporter,
+                "status": status,
+
+                # 계획
+                "plan_assignee": str(r.get("담당자","")).strip(),
+                "plan_due_date": try_parse_plan_due(r.get("개선계획(일정)")) if "개선계획(일정)" in df.columns else None,
+                "plan_text": "",
+
+                # 완료
+                "action_text": str(r.get("개선내용","") if "개선내용" in df.columns else "").strip(),
+                "action_date": try_parse_plan_due(r.get("개선완료일")) if "개선완료일" in df.columns else None,
+
+                # 사진(초기 빈 값)
+                "photos_before": [],
+                "photos_after": [],
+            }
+
+            # 1) DB insert 먼저
+            inserted = db_insert(payload)
+            task_id = str(inserted["id"])
+
+            # 2) 사진_전/후 (구글드라이브 링크) -> 다운로드 -> Storage 업로드 -> DB 업데이트
+            before_link = str(r.get("사진_전","") if "사진_전" in df.columns else "").strip()
+            after_link  = str(r.get("사진_후","") if "사진_후" in df.columns else "").strip()
+
+            before_list, after_list = [], []
+
+            if before_link and before_link != "nan":
+                b = download_drive_file_public(before_link)
+                if b:
+                    before_list = upload_images(task_id, "before", [("before.jpg", b)])
+                else:
+                    photo_fail_cnt += 1
+
+            if after_link and after_link != "nan":
+                a = download_drive_file_public(after_link)
+                if a:
+                    after_list = upload_images(task_id, "after", [("after.jpg", a)])
+                else:
+                    photo_fail_cnt += 1
+
+            if before_list or after_list:
+                db_update(task_id, {
+                    "photos_before": before_list,
+                    "photos_after": after_list
+                })
+
+            ok_cnt += 1
+
+        except Exception as e:
+            fail_cnt += 1
+            st.warning(f"{i+1}번째 행 실패: {e}")
+
+        progress.progress((i + 1) / len(df))
+
+    st.success(f"✅ 이전 완료: 성공 {ok_cnt} / 실패 {fail_cnt} (사진 다운로드 실패 {photo_fail_cnt})")
+
+
+# =========================
+# 메뉴에 '📦 데이터 이전(CSV)' 추가 후 아래 페이지 연결
+# =========================
+elif menu == "📦 데이터 이전(CSV)":
+    st.subheader("📦 데이터 이전(CSV → Supabase)")
+    st.caption("구글 드라이브 사진 링크는 '링크가 있는 사람 공개'여야 다운로드/이전됩니다.")
+
+    csv_up = st.file_uploader("CSV 업로드", type=["csv"])
+    if csv_up and st.button("🚀 이전 실행"):
+        with st.spinner("이전 중..."):
+            migrate_csv_to_supabase(csv_up)
+        st.success("완료!")
+
