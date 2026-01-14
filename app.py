@@ -184,7 +184,7 @@ def update_task(task_id: str, patch: dict):
 
 
 # =========================================================
-# 6) 엑셀 내보내기
+# 6) 엑셀 내보내기 (수정됨: 중복헤더 삭제 + 이미지 자동맞춤)
 # =========================================================
 def download_image_to_temp(url: str) -> str | None:
     try:
@@ -219,25 +219,33 @@ def export_excel(tasks: list[dict]) -> bytes:
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         sheet_data = "데이터"
-        df.to_excel(writer, sheet_name=sheet_data, index=False, startrow=1)
+        
+        # [수정] header=False로 중복 헤더 방지
+        df.to_excel(writer, sheet_name=sheet_data, index=False, startrow=1, header=False)
+        
         wb = writer.book
         ws = writer.sheets[sheet_data]
 
         header_fmt = wb.add_format({"bold": True, "bg_color": "#EFEFEF", "border": 1, "align": "center", "valign": "vcenter"})
+        
+        # 헤더 수동 작성 (0번 행)
         for col, name in enumerate(df.columns):
             ws.write(0, col, name, header_fmt)
             
+        # 열 너비 설정
         ws.set_column(0, 0, 30); ws.set_column(1, 1, 12); ws.set_column(2, 2, 15); ws.set_column(3, 3, 40); ws.set_column(4, 10, 15)
 
         img_cols = ["사진1", "사진2", "사진3"]
         base_col = len(df.columns)
         for i, c in enumerate(img_cols):
             ws.write(0, base_col + i, c, header_fmt)
-            ws.set_column(base_col + i, base_col + i, 20)
+            ws.set_column(base_col + i, base_col + i, 22) # 사진 컬럼 너비
 
+        # 행 높이 설정 (사진 공간, 100포인트 = 약 133픽셀)
         for r in range(1, len(df) + 1):
             ws.set_row(r, 100)
 
+        # 사진 삽입
         for idx, t in enumerate(tasks):
             photos = t.get("photos") or []
             if not isinstance(photos, list): photos = []
@@ -246,12 +254,34 @@ def export_excel(tasks: list[dict]) -> bytes:
             for j, p in enumerate(photos):
                 url = p.get("public_url")
                 if not url: continue
+                
                 img_path = download_image_to_temp(url)
                 if not img_path: continue
+                
                 try:
-                    ws.insert_image(idx + 1, base_col + j, img_path, {"x_scale": 0.2, "y_scale": 0.2, "object_position": 1})
+                    # [수정] 이미지 크기 자동 계산 (셀 안에 쏙 들어가게)
+                    with Image.open(img_path) as img:
+                        w, h = img.size
+                        
+                    # 엑셀 셀 크기 기준 (대략적 픽셀)
+                    # 너비 22 * 7 ≈ 150px, 높이 100pt ≈ 133px
+                    target_w = 150
+                    target_h = 130
+                    
+                    # 비율 계산
+                    scale_w = target_w / w
+                    scale_h = target_h / h
+                    scale = min(scale_w, scale_h) # 더 작은 비율을 따라가야 셀 안에 들어감
+                    
+                    # idx + 1 행에 삽입 (헤더가 0행이므로 데이터는 1행부터)
+                    ws.insert_image(idx + 1, base_col + j, img_path, {
+                        "x_scale": scale, 
+                        "y_scale": scale, 
+                        "object_position": 1
+                    })
                 except: pass
 
+        # 요약 시트
         sheet_sum = "요약"
         ws2 = wb.add_worksheet(sheet_sum)
         total = len(tasks)
@@ -300,7 +330,6 @@ with tabs[0]:
     today = date.today()
 
     with c1:
-        # [수정됨] 순서 변경: "월간"이 제일 먼저(기본값), "연간" 추가됨
         period_type = st.selectbox("기간 단위", ["월간", "주간", "연간", "직접선택"], index=0)
 
     if period_type == "월간":
@@ -314,7 +343,6 @@ with tabs[0]:
         d_to = end_of_week(base)
         
     elif period_type == "연간":
-        # [추가됨] 연간 조회 로직
         with c2:
             base_year = st.number_input("조회 연도", min_value=2020, max_value=2030, value=today.year, step=1)
         d_from = date(base_year, 1, 1)
