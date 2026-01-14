@@ -112,32 +112,66 @@ def delete_photo(photo_id: str, storage_path: str):
         pass
     sb.table("haccp_task_photos").delete().eq("id", photo_id).execute()
 
-# [추가됨] 과제 전체 삭제 함수 (사진 파일 + DB 데이터)
 def delete_task_entirely(task_id: str, photos: list):
-    # 1. 저장소(Storage)에서 사진 파일들 삭제
     if photos:
         paths = [p.get("storage_path") for p in photos if p.get("storage_path")]
         if paths:
             try:
                 sb.storage.from_(BUCKET).remove(paths)
             except:
-                pass # 파일 없어도 진행
-    
-    # 2. DB에서 과제 삭제 (Cascade 설정이 되어 있다면 사진 데이터도 자동 삭제되겠지만, 명시적으로 과제만 지우면 됨)
+                pass 
     sb.table("haccp_tasks").delete().eq("id", task_id).execute()
 
 
 # =========================================================
-# 5) DB 함수 (tasks)
+# 5) DB 함수 (데이터 조회 수정됨: View 대신 직접 조회)
 # =========================================================
+def fetch_photos_for_tasks(task_ids: list[str]) -> dict:
+    """
+    여러 과제의 사진을 한 번에 가져와서 {task_id: [사진목록]} 형태로 반환
+    """
+    if not task_ids:
+        return {}
+    
+    # DB에서 사진 테이블 조회
+    res = sb.table("haccp_task_photos").select("*").in_("task_id", task_ids).execute()
+    photos = res.data or []
+    
+    # task_id 별로 정리
+    photo_map = {}
+    for p in photos:
+        tid = p["task_id"]
+        # id 컬럼 이름을 photo_id로 통일 (삭제 로직 등과 호환 위해)
+        if "id" in p and "photo_id" not in p:
+            p["photo_id"] = p["id"]
+            
+        if tid not in photo_map:
+            photo_map[tid] = []
+        photo_map[tid].append(p)
+        
+    return photo_map
+
 def fetch_tasks(date_from: date | None = None, date_to: date | None = None) -> list[dict]:
-    q = sb.table("v_haccp_tasks").select("*").order("issue_date", desc=True).order("created_at", desc=True)
+    # 1. 과제 테이블(haccp_tasks) 직접 조회
+    q = sb.table("haccp_tasks").select("*").order("issue_date", desc=True).order("created_at", desc=True)
     if date_from:
         q = q.gte("issue_date", str(date_from))
     if date_to:
         q = q.lte("issue_date", str(date_to))
     res = q.execute()
-    return res.data or []
+    tasks = res.data or []
+
+    if not tasks:
+        return []
+
+    # 2. 사진 데이터 별도로 가져와서 합치기 (이 부분이 핵심)
+    t_ids = [t["id"] for t in tasks]
+    photo_map = fetch_photos_for_tasks(t_ids)
+
+    for t in tasks:
+        t["photos"] = photo_map.get(t["id"], [])
+
+    return tasks
 
 def insert_task(issue_date: date, location: str, issue_text: str, reporter: str) -> str:
     row = {
@@ -197,7 +231,7 @@ def export_excel(tasks: list[dict]) -> bytes:
         header_fmt = wb.add_format({"bold": True, "bg_color": "#EFEFEF", "border": 1, "align": "center", "valign": "vcenter"})
         for col, name in enumerate(df.columns):
             ws.write(0, col, name, header_fmt)
-
+            
         ws.set_column(0, 0, 30); ws.set_column(1, 1, 12); ws.set_column(2, 2, 15); ws.set_column(3, 3, 40); ws.set_column(4, 10, 15)
 
         img_cols = ["사진1", "사진2", "사진3"]
@@ -211,9 +245,8 @@ def export_excel(tasks: list[dict]) -> bytes:
 
         for idx, t in enumerate(tasks):
             photos = t.get("photos") or []
-            try:
-                if isinstance(photos, str): photos = json.loads(photos)
-            except: photos = []
+            # photos가 리스트가 아닐 경우 대비
+            if not isinstance(photos, list): photos = []
             photos = photos[:3]
 
             for j, p in enumerate(photos):
@@ -240,13 +273,11 @@ def export_excel(tasks: list[dict]) -> bytes:
 # [도우미 함수] 사진 목록 표시
 def display_task_photos(t):
     photos = t.get("photos") or []
-    if isinstance(photos, str):
-        try: photos = json.loads(photos)
-        except: photos = []
+    if not isinstance(photos, list): photos = []
     
     if photos:
         st.markdown("📸 **현장 사진**")
-        cols = st.columns(4) # 한 줄에 4개씩
+        cols = st.columns(4) 
         for i, p in enumerate(photos):
             with cols[i % 4]:
                 st.image(p.get("public_url"), use_container_width=True)
@@ -467,7 +498,6 @@ with tabs[4]:
 
     tasks = fetch_tasks(d_from, d_to)
     
-    # 필터링
     filtered = []
     for t in tasks:
         if st_flt != "전체" and t.get("status") != st_flt: continue
@@ -499,21 +529,14 @@ with tabs[4]:
              st.markdown(f"**담당:** {target.get('assignee') or '-'} | **완료일:** {target.get('action_done_date') or '-'}")
         
         with c_del:
-            st.write("") # 간격 맞춤
+            st.write("") 
             # [추가됨] 전체 삭제 버튼
             if st.button("🚨 과제 전체 삭제 (복구 불가)", type="primary"):
-                # 사진 목록 확보
-                p_list = target.get("photos") or []
-                if isinstance(p_list, str): 
-                    try: p_list = json.loads(p_list)
-                    except: p_list = []
-                
-                # 삭제 함수 실행
-                delete_task_entirely(target["id"], p_list)
+                delete_task_entirely(target["id"], target.get("photos"))
                 st.success("삭제되었습니다. (새로고침 중...)")
                 st.rerun()
 
-        # 사진 관리 섹션
+        # 사진 관리
         current_photos = display_task_photos(target)
         
         if current_photos:
