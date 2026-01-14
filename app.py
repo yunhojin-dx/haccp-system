@@ -91,42 +91,28 @@ def make_public_url(bucket: str, path: str) -> str:
     return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
 
 def upload_photo(task_id: str, uploaded_file) -> dict:
-    # 1. 이미지 압축
     raw = uploaded_file.read()
     compressed, ext = compress_image(raw, max_w=1400, quality=82)
-    
-    # 2. Storage에 업로드
-    filename = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
-    key = f"{task_id}/{filename}"
+    key = f"{task_id}/{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
 
-    res = sb.storage.from_(BUCKET).upload(
+    sb.storage.from_(BUCKET).upload(
         path=key,
         file=compressed,
         file_options={"content-type": "image/jpeg", "upsert": "false"},
     )
-    
-    # 3. DB에 정보 저장 (이 단계에서 테이블이 없으면 에러 발생)
     url = make_public_url(BUCKET, key)
-    row = {
-        "task_id": task_id,
-        "storage_path": key,
-        "public_url": url
-    }
+    row = {"task_id": task_id, "storage_path": key, "public_url": url}
     sb.table("haccp_task_photos").insert(row).execute()
     return row
 
 def delete_photo(photo_id: str, storage_path: str):
-    # 스토리지 파일 삭제 시도
     try:
         sb.storage.from_(BUCKET).remove([storage_path])
     except Exception:
-        pass # 파일이 이미 없어도 DB 삭제는 진행
-    
-    # DB 데이터 삭제
+        pass
     sb.table("haccp_task_photos").delete().eq("id", photo_id).execute()
 
 def delete_task_entirely(task_id: str, photos: list):
-    # 1. 사진 파일들 스토리지에서 삭제
     if photos:
         paths = [p.get("storage_path") for p in photos if p.get("storage_path")]
         if paths:
@@ -134,7 +120,6 @@ def delete_task_entirely(task_id: str, photos: list):
                 sb.storage.from_(BUCKET).remove(paths)
             except:
                 pass 
-    # 2. 과제 삭제 (Cascade 설정으로 DB 내 사진 데이터도 자동 삭제됨)
     sb.table("haccp_tasks").delete().eq("id", task_id).execute()
 
 
@@ -142,36 +127,29 @@ def delete_task_entirely(task_id: str, photos: list):
 # 5) DB 함수
 # =========================================================
 def fetch_photos_for_tasks(task_ids: list[str]) -> dict:
-    """Task ID 리스트에 해당하는 모든 사진을 가져옴"""
     if not task_ids:
         return {}
-    
     try:
         res = sb.table("haccp_task_photos").select("*").in_("task_id", task_ids).execute()
         photos = res.data or []
-        
         photo_map = {}
         for p in photos:
             tid = p["task_id"]
             if "id" in p and "photo_id" not in p:
                 p["photo_id"] = p["id"]
-                
             if tid not in photo_map:
                 photo_map[tid] = []
             photo_map[tid].append(p)
         return photo_map
     except Exception:
-        # 테이블이 없거나 에러 발생 시 빈 딕셔너리 반환 (앱이 멈추지 않게)
         return {}
 
 def fetch_tasks(date_from: date | None = None, date_to: date | None = None) -> list[dict]:
-    # 1. 과제 목록 조회
     q = sb.table("haccp_tasks").select("*").order("issue_date", desc=True).order("created_at", desc=True)
     if date_from:
         q = q.gte("issue_date", str(date_from))
     if date_to:
         q = q.lte("issue_date", str(date_to))
-    
     try:
         res = q.execute()
         tasks = res.data or []
@@ -182,7 +160,6 @@ def fetch_tasks(date_from: date | None = None, date_to: date | None = None) -> l
     if not tasks:
         return []
 
-    # 2. 사진 데이터 병합
     t_ids = [t["id"] for t in tasks]
     photo_map = fetch_photos_for_tasks(t_ids)
 
@@ -207,7 +184,7 @@ def update_task(task_id: str, patch: dict):
 
 
 # =========================================================
-# 6) 엑셀 내보내기 (사진 삽입 기능 포함)
+# 6) 엑셀 내보내기
 # =========================================================
 def download_image_to_temp(url: str) -> str | None:
     try:
@@ -287,7 +264,6 @@ def export_excel(tasks: list[dict]) -> bytes:
 
     return out.getvalue()
 
-# [도우미 함수] 사진 목록 표시
 def display_task_photos(t):
     photos = t.get("photos") or []
     if not isinstance(photos, list): photos = []
@@ -315,25 +291,36 @@ tabs = st.tabs([
 ])
 
 # ---------------------------------------------------------
-# (A) 대시보드/보고서
+# (A) 대시보드/보고서 (수정됨: 월간 기본 + 연간 추가)
 # ---------------------------------------------------------
 with tabs[0]:
     st.subheader("대시보드/보고서")
 
     c1, c2, c3 = st.columns([1.2, 1.2, 2])
-    with c1:
-        period_type = st.selectbox("기간 단위", ["주간", "월간", "직접선택"], index=0)
-
     today = date.today()
-    if period_type == "주간":
-        base = st.date_input("기준일", value=today)
-        d_from = start_of_week(base)
-        d_to = end_of_week(base)
-    elif period_type == "월간":
+
+    with c1:
+        # [수정됨] 순서 변경: "월간"이 제일 먼저(기본값), "연간" 추가됨
+        period_type = st.selectbox("기간 단위", ["월간", "주간", "연간", "직접선택"], index=0)
+
+    if period_type == "월간":
         base = st.date_input("기준월(아무 날짜)", value=today)
         d_from = start_of_month(base)
         d_to = end_of_month(base)
-    else:
+    
+    elif period_type == "주간":
+        base = st.date_input("기준일", value=today)
+        d_from = start_of_week(base)
+        d_to = end_of_week(base)
+        
+    elif period_type == "연간":
+        # [추가됨] 연간 조회 로직
+        with c2:
+            base_year = st.number_input("조회 연도", min_value=2020, max_value=2030, value=today.year, step=1)
+        d_from = date(base_year, 1, 1)
+        d_to = date(base_year, 12, 31)
+        
+    else: # 직접선택
         with c2:
             d_from = st.date_input("시작일", value=today - timedelta(days=30))
         with c3:
@@ -375,7 +362,7 @@ with tabs[0]:
             ).properties(height=360)
             st.altair_chart(chart1, use_container_width=True)
 
-        st.markdown("#### 일자별 추이")
+        st.markdown("#### 일자별 추이 (발생일 기준)")
         df_day = pd.DataFrame([{
             "일자": t.get("issue_date"),
             "발굴": 1,
