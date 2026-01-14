@@ -276,7 +276,7 @@ tabs = st.tabs([
 ])
 
 # ---------------------------------------------------------
-# (A) 대시보드/보고서 (수정됨: 그래프 에러 방지 버전)
+# (A) 대시보드/보고서 (수정됨: 그래프 레이블 가로 방향)
 # ---------------------------------------------------------
 with tabs[0]:
     st.subheader("대시보드/보고서")
@@ -314,24 +314,24 @@ with tabs[0]:
     if total == 0:
         st.info("선택한 기간에 데이터가 없습니다.")
     else:
-        # 데이터프레임 생성 (안전장치)
+        # 데이터프레임 생성
         df_loc = pd.DataFrame([{
             "공정/장소": (t.get("location") or "미분류").strip(),
             "상태": t.get("status")
         } for t in tasks])
 
-        # 1. 장소별 차트 (Pandas Melt 방식 사용)
+        # 1. 장소별 차트 (레이블 가로 방향 적용)
         st.markdown("#### 공정/장소별 발굴 vs 완료")
         if not df_loc.empty:
             loc_pivot = (
                 df_loc.assign(발굴=1, 완료=(df_loc["상태"] == "완료").astype(int))
                 .groupby("공정/장소", as_index=False)[["발굴", "완료"]].sum()
             )
-            # Altair가 좋아하는 Long Format으로 변환
             loc_long = loc_pivot.melt("공정/장소", var_name="구분", value_name="건수")
 
             chart1 = alt.Chart(loc_long).mark_bar().encode(
-                x=alt.X("공정/장소:N", sort="-y", title="장소"),
+                # 👇 여기 labelAngle=0 추가됨 (가로로 보이게)
+                x=alt.X("공정/장소:N", sort="-y", title="장소", axis=alt.Axis(labelAngle=0)),
                 y=alt.Y("건수:Q", title="건수"),
                 color=alt.Color("구분:N", scale=alt.Scale(domain=['발굴', '완료'], range=['#FF9F36', '#2ECC71'])),
                 xOffset="구분:N",
@@ -351,7 +351,6 @@ with tabs[0]:
             df_day["일자"] = pd.to_datetime(df_day["일자"])
             day_pivot = df_day.groupby("일자", as_index=False)[["발굴", "완료"]].sum().sort_values("일자")
             
-            # Altair가 좋아하는 Long Format으로 변환
             day_long = day_pivot.melt("일자", var_name="구분", value_name="건수")
 
             chart2 = alt.Chart(day_long).mark_line(point=True).encode(
