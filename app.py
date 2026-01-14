@@ -184,7 +184,7 @@ def update_task(task_id: str, patch: dict):
 
 
 # =========================================================
-# 6) 엑셀 내보내기 (수정됨: 중복헤더 삭제 + 이미지 자동맞춤)
+# 6) 엑셀 내보내기 (텍스트 중앙 정렬 + 디자인 개선)
 # =========================================================
 def download_image_to_temp(url: str) -> str | None:
     try:
@@ -220,32 +220,52 @@ def export_excel(tasks: list[dict]) -> bytes:
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         sheet_data = "데이터"
         
-        # [수정] header=False로 중복 헤더 방지
+        # [중요] header=False로 하여 to_excel이 만드는 제목을 뺍니다.
         df.to_excel(writer, sheet_name=sheet_data, index=False, startrow=1, header=False)
         
         wb = writer.book
         ws = writer.sheets[sheet_data]
 
-        header_fmt = wb.add_format({"bold": True, "bg_color": "#EFEFEF", "border": 1, "align": "center", "valign": "vcenter"})
+        # 1. 헤더 스타일 (진하게, 회색 배경, 중앙 정렬, 테두리)
+        header_fmt = wb.add_format({
+            "bold": True, 
+            "bg_color": "#EFEFEF", 
+            "border": 1, 
+            "align": "center", 
+            "valign": "vcenter"
+        })
+        
+        # 2. 데이터 셀 스타일 (중앙 정렬 핵심!, 줄바꿈, 테두리)
+        cell_fmt = wb.add_format({
+            "align": "center",    # 가로 가운데
+            "valign": "vcenter",  # 세로 가운데 (사진 때문에 행이 높아지므로 필수)
+            "text_wrap": True,    # 내용이 길면 줄바꿈
+            "border": 1           # 모든 셀에 테두리
+        })
         
         # 헤더 수동 작성 (0번 행)
         for col, name in enumerate(df.columns):
             ws.write(0, col, name, header_fmt)
             
-        # 열 너비 설정
-        ws.set_column(0, 0, 30); ws.set_column(1, 1, 12); ws.set_column(2, 2, 15); ws.set_column(3, 3, 40); ws.set_column(4, 10, 15)
+        # 열 너비 및 포맷 설정 (여기서 cell_fmt를 적용해야 모든 데이터가 가운데로 옴)
+        ws.set_column(0, 0, 30, cell_fmt)  # ID
+        ws.set_column(1, 1, 12, cell_fmt)  # 일시
+        ws.set_column(2, 2, 15, cell_fmt)  # 장소
+        ws.set_column(3, 3, 40, cell_fmt)  # 필요사항
+        ws.set_column(4, 10, 15, cell_fmt) # 나머지 컬럼들
 
+        # 사진 컬럼 추가 설정
         img_cols = ["사진1", "사진2", "사진3"]
         base_col = len(df.columns)
         for i, c in enumerate(img_cols):
             ws.write(0, base_col + i, c, header_fmt)
-            ws.set_column(base_col + i, base_col + i, 22) # 사진 컬럼 너비
+            ws.set_column(base_col + i, base_col + i, 22, cell_fmt) # 사진 컬럼에도 포맷 적용
 
-        # 행 높이 설정 (사진 공간, 100포인트 = 약 133픽셀)
+        # 행 높이 설정 (사진 공간 확보)
         for r in range(1, len(df) + 1):
             ws.set_row(r, 100)
 
-        # 사진 삽입
+        # 사진 삽입 로직
         for idx, t in enumerate(tasks):
             photos = t.get("photos") or []
             if not isinstance(photos, list): photos = []
@@ -259,21 +279,19 @@ def export_excel(tasks: list[dict]) -> bytes:
                 if not img_path: continue
                 
                 try:
-                    # [수정] 이미지 크기 자동 계산 (셀 안에 쏙 들어가게)
+                    # 이미지 크기 자동 계산 (셀 안으로 쏙 들어가게)
                     with Image.open(img_path) as img:
                         w, h = img.size
                         
-                    # 엑셀 셀 크기 기준 (대략적 픽셀)
-                    # 너비 22 * 7 ≈ 150px, 높이 100pt ≈ 133px
+                    # 엑셀 셀 크기 기준 (약 150x133 픽셀)
                     target_w = 150
                     target_h = 130
                     
-                    # 비율 계산
                     scale_w = target_w / w
                     scale_h = target_h / h
-                    scale = min(scale_w, scale_h) # 더 작은 비율을 따라가야 셀 안에 들어감
+                    scale = min(scale_w, scale_h) * 0.9 # 90% 크기로 약간 여백 주기
                     
-                    # idx + 1 행에 삽입 (헤더가 0행이므로 데이터는 1행부터)
+                    # 엑셀은 0번 행이 헤더이므로 데이터는 idx+1 행부터 시작
                     ws.insert_image(idx + 1, base_col + j, img_path, {
                         "x_scale": scale, 
                         "y_scale": scale, 
@@ -281,13 +299,17 @@ def export_excel(tasks: list[dict]) -> bytes:
                     })
                 except: pass
 
-        # 요약 시트
+        # 요약 시트 작성
         sheet_sum = "요약"
         ws2 = wb.add_worksheet(sheet_sum)
         total = len(tasks)
         done = sum(1 for t in tasks if t.get("status") == "완료")
         rate = (done / total * 100) if total else 0.0
-        ws2.write(0, 0, "HACCP 개선 보고서", wb.add_format({"bold": True, "font_size": 16}))
+        
+        # 요약 시트 스타일
+        title_fmt = wb.add_format({"bold": True, "font_size": 16})
+        
+        ws2.write(0, 0, "HACCP 개선 보고서", title_fmt)
         ws2.write(2, 0, "총 발굴건수"); ws2.write(2, 1, total)
         ws2.write(3, 0, "개선완료 건수"); ws2.write(3, 1, done)
         ws2.write(4, 0, "완료율(%)"); ws2.write(4, 1, round(rate, 1))
@@ -321,7 +343,7 @@ tabs = st.tabs([
 ])
 
 # ---------------------------------------------------------
-# (A) 대시보드/보고서 (수정됨: 월간 기본 + 연간 추가)
+# (A) 대시보드/보고서
 # ---------------------------------------------------------
 with tabs[0]:
     st.subheader("대시보드/보고서")
