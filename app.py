@@ -795,15 +795,137 @@ def migrate_csv_to_supabase(csv_file) -> None:
 
 
 # =========================
-# 메뉴에 '📦 데이터 이전(CSV)' 추가 후 아래 페이지 연결
+# 📦 리스트만 이전(CSV → Supabase)
 # =========================
-elif menu == "📦 데이터 이전(CSV)":
-    st.subheader("📦 데이터 이전(CSV → Supabase)")
-    st.caption("구글 드라이브 사진 링크는 '링크가 있는 사람 공개'여야 다운로드/이전됩니다.")
+def _norm_str(x: Any) -> str:
+    s = "" if x is None else str(x)
+    s = s.strip()
+    return "" if s.lower() == "nan" else s
+
+def _map_status(s: str) -> str:
+    s = _norm_str(s)
+    if s in ["진행중", "계획수립", "완료"]:
+        return s
+    # 혹시 "완료 " 같은 공백/다른 값이 섞이면 보정
+    if "완료" in s:
+        return "완료"
+    if "계획" in s:
+        return "계획수립"
+    return "진행중"
+
+def _parse_date_any(x: Any) -> Optional[str]:
+    s = _norm_str(x)
+    if not s:
+        return None
+    s = s.replace(".", "-").replace("/", "-")
+    try:
+        d = pd.to_datetime(s, errors="coerce")
+        if pd.isna(d):
+            return None
+        return d.date().strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+def upsert_by_legacy(legacy_id: str, payload: Dict[str, Any]) -> None:
+    """
+    legacy_id가 있으면 update, 없으면 insert.
+    (supabase python client에 upsert 제약이 버전에 따라 애매해서 안전하게 2-step)
+    """
+    legacy_id = str(legacy_id).strip()
+    exists = sb.table("haccp_tasks").select("id").eq("legacy_id", legacy_id).execute().data
+    if exists:
+        sb.table("haccp_tasks").update(payload).eq("legacy_id", legacy_id).execute()
+    else:
+        payload2 = dict(payload)
+        payload2["legacy_id"] = legacy_id
+        sb.table("haccp_tasks").insert(payload2).execute()
+
+def migrate_list_only(csv_file) -> None:
+    df = pd.read_csv(csv_file)
+
+    if df.empty:
+        st.error("CSV가 비어있습니다.")
+        return
+
+    # 네 CSV 기준 필수 컬럼
+    required_cols = ["ID", "일시", "공정", "개선 필요사항", "담당자", "진행상태"]
+    for c in required_cols:
+        if c not in df.columns:
+            st.error(f"CSV 필수 컬럼 누락: {c}")
+            return
+
+    overwrite_existing = st.session_state.get("overwrite_existing", False)
+
+    prog = st.progress(0)
+    ok = 0
+    skipped = 0
+    fail = 0
+
+    for i, r in df.iterrows():
+        try:
+            legacy_id = _norm_str(r.get("ID"))
+            if not legacy_id:
+                fail += 1
+                continue
+
+            # 기존 존재하면 스킵(덮어쓰기 선택 안 했을 때)
+            if not overwrite_existing:
+                exists = sb.table("haccp_tasks").select("id").eq("legacy_id", legacy_id).execute().data
+                if exists:
+                    skipped += 1
+                    prog.progress((i + 1) / len(df))
+                    continue
+
+            payload = {
+                "issue_date": _parse_date_any(r.get("일시")),
+                "location": _norm_str(r.get("공정")),
+                "issue_text": _norm_str(r.get("개선 필요사항")),
+                "reporter": _norm_str(r.get("발견자")) if "발견자" in df.columns else "",
+
+                "status": _map_status(r.get("진행상태")),
+
+                # 계획(일단 담당자/일정만 옮겨두고, plan_text는 빈값)
+                "plan_assignee": _norm_str(r.get("담당자")),
+                "plan_due_date": _parse_date_any(r.get("개선계획(일정)")) if "개선계획(일정)" in df.columns else None,
+                "plan_text": "",
+
+                # 완료
+                "action_text": _norm_str(r.get("개선내용")) if "개선내용" in df.columns else "",
+                "action_date": _parse_date_any(r.get("개선완료일")) if "개선완료일" in df.columns else None,
+
+                # ✅ 사진은 나중에 앱에서 추가할 거라 빈 배열로 유지
+                "photos_before": [],
+                "photos_after": [],
+            }
+
+            upsert_by_legacy(legacy_id, payload)
+            ok += 1
+
+        except Exception as e:
+            fail += 1
+            st.warning(f"{i+1}행 실패(ID={r.get('ID')}): {e}")
+
+        prog.progress((i + 1) / len(df))
+
+    st.success(f"✅ 리스트 이전 완료: 성공 {ok} / 스킵 {skipped} / 실패 {fail}")
+
+# =========================
+# 메뉴 페이지
+# =========================
+if menu == "📦 리스트만 이전(CSV)":
+    st.subheader("📦 리스트만 이전 (CSV → Supabase DB)")
+    st.caption("사진은 옮기지 않습니다. 이후 '개선과제등록/개선완료 입력'에서 사진만 추가하면 됩니다.")
 
     csv_up = st.file_uploader("CSV 업로드", type=["csv"])
-    if csv_up and st.button("🚀 이전 실행"):
+
+    st.session_state["overwrite_existing"] = st.checkbox(
+        "기존 legacy_id가 있으면 덮어쓰기(업데이트) 할래요",
+        value=False
+    )
+
+    if csv_up and st.button("🚀 리스트 이전 실행"):
         with st.spinner("이전 중..."):
-            migrate_csv_to_supabase(csv_up)
+            migrate_list_only(csv_up)
         st.success("완료!")
+
 
