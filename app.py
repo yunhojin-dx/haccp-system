@@ -226,7 +226,7 @@ def display_task_photos(t):
 tabs = st.tabs(["📊 대시보드", "📝 문제등록", "📅 계획수립", "🛠️ 조치입력", "🔍 조회/관리"])
 
 # ---------------------------------------------------------
-# (A) 대시보드/보고서
+# (A) 대시보드/보고서 (수정됨: 장소별 그래프 + 표)
 # ---------------------------------------------------------
 with tabs[0]:
     raw_tasks = fetch_tasks_all()
@@ -237,24 +237,19 @@ with tabs[0]:
         df_all = pd.DataFrame(raw_tasks)
         df_all['issue_date'] = pd.to_datetime(df_all['issue_date'])
         
-        # 필터링 및 그래프용 파생 컬럼
+        # 파생 컬럼 생성
         df_all['Year'] = df_all['issue_date'].dt.year
-        df_all['Month_Str'] = df_all['issue_date'].dt.strftime('%m월')
         df_all['YYYY-MM'] = df_all['issue_date'].dt.strftime('%Y-%m')
-        df_all['Week_Num'] = df_all['issue_date'].apply(lambda x: x.isocalendar()[1])
         df_all['Week_Label'] = df_all['issue_date'].apply(lambda x: f"{x.year}-{x.isocalendar()[1]:02d}주차")
 
         # 2. 필터 UI
         c1, c2 = st.columns([1, 4])
         with c1:
-            period_mode = st.selectbox("기간 기준", ["월간", "연간", "주간", "기간지정"], index=0)
+            period_mode = st.selectbox("기간 기준", ["월간", "주간", "연간", "기간지정"], index=0)
         
         filtered_df = df_all.copy()
         today = date.today()
         
-        # 차트용 X축 데이터(빈 날짜 채우기용)
-        chart_base_df = pd.DataFrame() 
-
         with c2:
             if period_mode == "월간":
                 all_months = sorted(df_all['YYYY-MM'].unique(), reverse=True)
@@ -262,39 +257,9 @@ with tabs[0]:
                 default_m = [this_month] if this_month in all_months else (all_months[:1] if all_months else [])
                 
                 selected_months = st.multiselect("조회할 월 선택", all_months, default=default_m)
-                
                 if selected_months:
                     filtered_df = df_all[df_all['YYYY-MM'].isin(selected_months)]
-                    # 차트용: 선택된 월의 1일~말일 생성
-                    # (간단히 표시하기 위해 '일' 단위로)
-                    # 여기서는 사용자 편의상 '일자별'로 보여주는게 나음
-                    chart_axis_col = "issue_date"
-                    chart_axis_title = "일자"
-                    chart_fmt = "%m-%d"
-                else:
-                    filtered_df = df_all.iloc[0:0]
-
-            elif period_mode == "연간":
-                all_years = sorted(df_all['Year'].unique(), reverse=True)
-                this_year = datetime.now().year
-                default_y = [this_year] if this_year in all_years else (all_years[:1] if all_years else [])
-                
-                selected_years = st.multiselect("조회할 연도 선택", all_years, default=default_y)
-                
-                if selected_years:
-                    filtered_df = df_all[df_all['Year'].isin(selected_years)]
-                    
-                    # [0 채우기 로직] 1주차~52주차 틀 만들기
-                    weeks_list = []
-                    for y in selected_years:
-                        for w in range(1, 53):
-                            weeks_list.append(f"{y}-{w:02d}주차")
-                    chart_base_df = pd.DataFrame({"Week_Label": weeks_list})
-                    chart_axis_col = "Week_Label"
-                    chart_axis_title = "주차"
-                    chart_fmt = None # 문자열이라 포맷 불필요
-                else:
-                    filtered_df = df_all.iloc[0:0]
+                else: filtered_df = df_all.iloc[0:0]
 
             elif period_mode == "주간":
                 all_weeks = sorted(df_all['Week_Label'].unique(), reverse=True)
@@ -305,11 +270,17 @@ with tabs[0]:
                 selected_weeks = st.multiselect("조회할 주차 선택", all_weeks, default=default_w)
                 if selected_weeks:
                     filtered_df = df_all[df_all['Week_Label'].isin(selected_weeks)]
-                    chart_axis_col = "issue_date" # 주간상세는 일자별로
-                    chart_axis_title = "일자"
-                    chart_fmt = "%a" # 요일
-                else:
-                    filtered_df = df_all.iloc[0:0]
+                else: filtered_df = df_all.iloc[0:0]
+
+            elif period_mode == "연간":
+                all_years = sorted(df_all['Year'].unique(), reverse=True)
+                this_year = datetime.now().year
+                default_y = [this_year] if this_year in all_years else (all_years[:1] if all_years else [])
+                
+                selected_years = st.multiselect("조회할 연도 선택", all_years, default=default_y)
+                if selected_years:
+                    filtered_df = df_all[df_all['Year'].isin(selected_years)]
+                else: filtered_df = df_all.iloc[0:0]
 
             else: # 기간지정
                 d_col1, d_col2 = st.columns(2)
@@ -319,9 +290,6 @@ with tabs[0]:
                     (df_all['issue_date'].dt.date >= start_d) & 
                     (df_all['issue_date'].dt.date <= end_d)
                 ]
-                chart_axis_col = "issue_date"
-                chart_axis_title = "일자"
-                chart_fmt = "%m-%d"
 
         # 3. 핵심 지표
         st.divider()
@@ -341,68 +309,39 @@ with tabs[0]:
                     fname = f"HACCP_보고서_{datetime.now().strftime('%Y%m%d')}.xlsx"
                     st.download_button("⬇️ 파일 받기", data=xbytes, file_name=fname, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # 4. 차트와 표
+        # 4. 차트(장소별)와 표(장소별)
         st.divider()
-        col_chart, col_table = st.columns([1, 1])
-        
-        # (1) 시계열 차트 데이터 준비 (0 채우기)
-        if period_mode == "연간" and not chart_base_df.empty:
-            # 연간일 때는 주차별로 집계
-            real_data = filtered_df.groupby('Week_Label').agg(
+        if total_cnt == 0:
+            st.warning("선택된 기간에 데이터가 없습니다.")
+        else:
+            col_chart, col_table = st.columns([1, 1])
+            
+            # 장소별 집계 공통 사용
+            filtered_df['공정/장소'] = filtered_df['location'].fillna("미분류").str.strip()
+            loc_stats = filtered_df.groupby('공정/장소').agg(
                 발생건수=('id', 'count'),
                 완료건수=('status', lambda x: (x == '완료').sum())
             ).reset_index()
-            # 1~52주차 틀에 병합 (없는 주차는 0)
-            chart_data = pd.merge(chart_base_df, real_data, on='Week_Label', how='left').fillna(0)
-            
-        else:
-            # 그 외는 날짜별 집계
-            if not filtered_df.empty:
-                chart_data = filtered_df.groupby('issue_date').agg(
-                    발생건수=('id', 'count'),
-                    완료건수=('status', lambda x: (x == '완료').sum())
-                ).reset_index()
-            else:
-                chart_data = pd.DataFrame(columns=['issue_date', '발생건수', '완료건수'])
+            loc_stats['개선율'] = (loc_stats['완료건수'] / loc_stats['발생건수'] * 100).round(1)
+            loc_stats = loc_stats.sort_values('발생건수', ascending=False)
 
-        # 차트 그리기
-        with col_chart:
-            if period_mode == "연간":
-                st.markdown("##### 📊 주차별 추이 (1~52주)")
-                c_data = chart_data.melt('Week_Label', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
-                chart = alt.Chart(c_data).mark_line(point=True).encode(
-                    x=alt.X('Week_Label', title='주차', axis=alt.Axis(labelAngle=-45)),
-                    y=alt.Y('건수:Q'),
+            with col_chart:
+                # [그래프] 장소별 막대 그래프 (기존 형태 복구)
+                st.markdown("##### 📊 장소별 발생/완료 현황")
+                c_data = loc_stats.melt('공정/장소', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
+                
+                chart = alt.Chart(c_data).mark_bar().encode(
+                    x=alt.X('공정/장소:N', sort='-y', axis=alt.Axis(labelAngle=0), title=None),
+                    y=alt.Y('건수:Q', title=None),
                     color=alt.Color('구분:N', scale=alt.Scale(domain=['발생건수', '완료건수'], range=['#FF9F36', '#2ECC71'])),
-                    tooltip=['Week_Label', '구분', '건수']
+                    xOffset='구분:N',
+                    tooltip=['공정/장소', '구분', '건수']
                 ).properties(height=300)
                 st.altair_chart(chart, use_container_width=True)
-            else:
-                st.markdown("##### 📊 일자별 추이")
-                if not chart_data.empty:
-                    c_data = chart_data.melt('issue_date', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
-                    chart = alt.Chart(c_data).mark_line(point=True).encode(
-                        x=alt.X('issue_date:T', title='일자', axis=alt.Axis(format=chart_fmt)),
-                        y=alt.Y('건수:Q'),
-                        color=alt.Color('구분:N', scale=alt.Scale(domain=['발생건수', '완료건수'], range=['#FF9F36', '#2ECC71'])),
-                        tooltip=[alt.Tooltip('issue_date:T', format='%Y-%m-%d'), '구분', '건수']
-                    ).properties(height=300)
-                    st.altair_chart(chart, use_container_width=True)
-                else:
-                    st.info("표시할 데이터가 없습니다.")
 
-        # (2) 장소별 통계 (표)
-        with col_table:
-            st.markdown("##### 📋 장소별 집계")
-            if not filtered_df.empty:
-                filtered_df['공정/장소'] = filtered_df['location'].fillna("미분류").str.strip()
-                loc_stats = filtered_df.groupby('공정/장소').agg(
-                    발생건수=('id', 'count'),
-                    완료건수=('status', lambda x: (x == '완료').sum())
-                ).reset_index()
-                loc_stats['개선율'] = (loc_stats['완료건수'] / loc_stats['발생건수'] * 100).round(1)
-                loc_stats = loc_stats.sort_values('발생건수', ascending=False)
-                
+            with col_table:
+                # [표] 장소별 상세 집계
+                st.markdown("##### 📋 장소별 상세 집계")
                 display_table = loc_stats.rename(columns={'공정/장소': '장소'})
                 st.dataframe(
                     display_table,
@@ -416,8 +355,6 @@ with tabs[0]:
                     hide_index=True,
                     height=300
                 )
-            else:
-                st.info("데이터 없음")
 
 
 # ---------------------------------------------------------
@@ -526,25 +463,21 @@ with tabs[4]:
     else:
         # [NEW] 리스트 표시 (선택 가능하게 설정)
         df_list = pd.DataFrame(filtered)
-        # 표시할 컬럼만 선택
         display_cols = ['issue_date', 'location', 'issue_text', 'status', 'action_done_date']
         df_display = df_list[display_cols].copy()
         df_display.columns = ['일시', '장소', '내용', '상태', '완료일']
         
         st.markdown("👇 **목록에서 과제를 클릭하면 아래에 상세 내용이 나옵니다.**")
         
-        # selection_mode='single-row'로 설정하여 클릭 시 선택되게 함
         selection = st.dataframe(
             df_display, 
             use_container_width=True, 
             hide_index=True, 
             height=250,
-            on_select="rerun", # 클릭 시 리런하여 아래 내용 갱신
+            on_select="rerun",
             selection_mode="single-row"
         )
         
-        # 선택된 행이 있는지 확인
-        selected_index = None
         if selection.selection.rows:
             selected_index = selection.selection.rows[0]
             target = filtered[selected_index]
@@ -562,7 +495,6 @@ with tabs[4]:
                     st.success("삭제됨")
                     st.rerun()
 
-            # 사진 관리 섹션 (발굴/완료 구분 없이 모두 표시 및 관리 가능)
             st.markdown("##### 📸 사진 관리 (발굴 및 조치 사진)")
             current_photos = display_task_photos(target)
             
