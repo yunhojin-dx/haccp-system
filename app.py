@@ -267,11 +267,10 @@ st.title(APP_TITLE)
 
 with st.sidebar:
     st.markdown("## ☁️ HACCP 개선관리")
-    menu = st.radio(
-        "메뉴",
-        ["📊 대시보드", "📝 개선과제등록", "🧩 개선계획수립", "✅ 개선완료 입력", "🧾 보고서/출력"],
-        index=0,
-    )
+menu = st.sidebar.radio(
+    "메뉴",
+    ["📊 대시보드", "📝 개선과제등록", "🧩 개선계획수립", "✅ 개선완료 입력", "🧾 보고서/출력", "📦 리스트만 이전(CSV)"],
+)
     st.markdown("---")
     if st.button("🔄 새로고침"):
         st.rerun()
