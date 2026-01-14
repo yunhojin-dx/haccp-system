@@ -91,28 +91,42 @@ def make_public_url(bucket: str, path: str) -> str:
     return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
 
 def upload_photo(task_id: str, uploaded_file) -> dict:
+    # 1. 이미지 압축
     raw = uploaded_file.read()
     compressed, ext = compress_image(raw, max_w=1400, quality=82)
-    key = f"{task_id}/{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
+    
+    # 2. Storage에 업로드
+    filename = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
+    key = f"{task_id}/{filename}"
 
-    sb.storage.from_(BUCKET).upload(
+    res = sb.storage.from_(BUCKET).upload(
         path=key,
         file=compressed,
         file_options={"content-type": "image/jpeg", "upsert": "false"},
     )
+    
+    # 3. DB에 정보 저장 (이 단계에서 테이블이 없으면 에러 발생)
     url = make_public_url(BUCKET, key)
-    row = {"task_id": task_id, "storage_path": key, "public_url": url}
+    row = {
+        "task_id": task_id,
+        "storage_path": key,
+        "public_url": url
+    }
     sb.table("haccp_task_photos").insert(row).execute()
     return row
 
 def delete_photo(photo_id: str, storage_path: str):
+    # 스토리지 파일 삭제 시도
     try:
         sb.storage.from_(BUCKET).remove([storage_path])
     except Exception:
-        pass
+        pass # 파일이 이미 없어도 DB 삭제는 진행
+    
+    # DB 데이터 삭제
     sb.table("haccp_task_photos").delete().eq("id", photo_id).execute()
 
 def delete_task_entirely(task_id: str, photos: list):
+    # 1. 사진 파일들 스토리지에서 삭제
     if photos:
         paths = [p.get("storage_path") for p in photos if p.get("storage_path")]
         if paths:
@@ -120,51 +134,55 @@ def delete_task_entirely(task_id: str, photos: list):
                 sb.storage.from_(BUCKET).remove(paths)
             except:
                 pass 
+    # 2. 과제 삭제 (Cascade 설정으로 DB 내 사진 데이터도 자동 삭제됨)
     sb.table("haccp_tasks").delete().eq("id", task_id).execute()
 
 
 # =========================================================
-# 5) DB 함수 (데이터 조회 수정됨: View 대신 직접 조회)
+# 5) DB 함수
 # =========================================================
 def fetch_photos_for_tasks(task_ids: list[str]) -> dict:
-    """
-    여러 과제의 사진을 한 번에 가져와서 {task_id: [사진목록]} 형태로 반환
-    """
+    """Task ID 리스트에 해당하는 모든 사진을 가져옴"""
     if not task_ids:
         return {}
     
-    # DB에서 사진 테이블 조회
-    res = sb.table("haccp_task_photos").select("*").in_("task_id", task_ids).execute()
-    photos = res.data or []
-    
-    # task_id 별로 정리
-    photo_map = {}
-    for p in photos:
-        tid = p["task_id"]
-        # id 컬럼 이름을 photo_id로 통일 (삭제 로직 등과 호환 위해)
-        if "id" in p and "photo_id" not in p:
-            p["photo_id"] = p["id"]
-            
-        if tid not in photo_map:
-            photo_map[tid] = []
-        photo_map[tid].append(p)
+    try:
+        res = sb.table("haccp_task_photos").select("*").in_("task_id", task_ids).execute()
+        photos = res.data or []
         
-    return photo_map
+        photo_map = {}
+        for p in photos:
+            tid = p["task_id"]
+            if "id" in p and "photo_id" not in p:
+                p["photo_id"] = p["id"]
+                
+            if tid not in photo_map:
+                photo_map[tid] = []
+            photo_map[tid].append(p)
+        return photo_map
+    except Exception:
+        # 테이블이 없거나 에러 발생 시 빈 딕셔너리 반환 (앱이 멈추지 않게)
+        return {}
 
 def fetch_tasks(date_from: date | None = None, date_to: date | None = None) -> list[dict]:
-    # 1. 과제 테이블(haccp_tasks) 직접 조회
+    # 1. 과제 목록 조회
     q = sb.table("haccp_tasks").select("*").order("issue_date", desc=True).order("created_at", desc=True)
     if date_from:
         q = q.gte("issue_date", str(date_from))
     if date_to:
         q = q.lte("issue_date", str(date_to))
-    res = q.execute()
-    tasks = res.data or []
+    
+    try:
+        res = q.execute()
+        tasks = res.data or []
+    except Exception as e:
+        st.error(f"데이터 조회 실패: {e}")
+        return []
 
     if not tasks:
         return []
 
-    # 2. 사진 데이터 별도로 가져와서 합치기 (이 부분이 핵심)
+    # 2. 사진 데이터 병합
     t_ids = [t["id"] for t in tasks]
     photo_map = fetch_photos_for_tasks(t_ids)
 
@@ -189,11 +207,11 @@ def update_task(task_id: str, patch: dict):
 
 
 # =========================================================
-# 6) 엑셀 내보내기
+# 6) 엑셀 내보내기 (사진 삽입 기능 포함)
 # =========================================================
 def download_image_to_temp(url: str) -> str | None:
     try:
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=10)
         r.raise_for_status()
         fd, path = tempfile.mkstemp(suffix=".jpg")
         os.close(fd)
@@ -245,7 +263,6 @@ def export_excel(tasks: list[dict]) -> bytes:
 
         for idx, t in enumerate(tasks):
             photos = t.get("photos") or []
-            # photos가 리스트가 아닐 경우 대비
             if not isinstance(photos, list): photos = []
             photos = photos[:3]
 
@@ -416,12 +433,12 @@ with tabs[1]:
                         upload_photo(task_id, f)
                 st.success("등록 완료! 조회 탭에서 확인하세요.")
             except Exception as e:
-                st.error("등록 실패")
+                st.error(f"등록 실패: {e}")
                 st.exception(e)
 
 
 # ---------------------------------------------------------
-# (C) 개선계획수립 (사진 표시 추가)
+# (C) 개선계획수립
 # ---------------------------------------------------------
 with tabs[2]:
     st.subheader("개선계획수립")
@@ -436,7 +453,6 @@ with tabs[2]:
         st.divider()
         st.markdown(f"**📍 장소:** {t.get('location')}  /  **📝 내용:** {t.get('issue_text')}")
         
-        # [추가됨] 사진 보기
         display_task_photos(t)
         st.divider()
 
@@ -454,7 +470,7 @@ with tabs[2]:
 
 
 # ---------------------------------------------------------
-# (D) 개선완료 입력 (사진 표시 추가)
+# (D) 개선완료 입력
 # ---------------------------------------------------------
 with tabs[3]:
     st.subheader("개선완료 입력")
@@ -469,7 +485,6 @@ with tabs[3]:
         st.divider()
         st.markdown(f"**📍 장소:** {t.get('location')}  /  **📝 내용:** {t.get('issue_text')}")
         
-        # [추가됨] 사진 보기
         display_task_photos(t)
         st.divider()
 
@@ -486,7 +501,7 @@ with tabs[3]:
 
 
 # ---------------------------------------------------------
-# (E) 조회/관리 (사진 표시 보강 + 전체 삭제 추가)
+# (E) 조회/관리
 # ---------------------------------------------------------
 with tabs[4]:
     st.subheader("조회/관리")
@@ -530,13 +545,11 @@ with tabs[4]:
         
         with c_del:
             st.write("") 
-            # [추가됨] 전체 삭제 버튼
             if st.button("🚨 과제 전체 삭제 (복구 불가)", type="primary"):
                 delete_task_entirely(target["id"], target.get("photos"))
                 st.success("삭제되었습니다. (새로고침 중...)")
                 st.rerun()
 
-        # 사진 관리
         current_photos = display_task_photos(target)
         
         if current_photos:
