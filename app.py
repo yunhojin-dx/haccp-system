@@ -17,7 +17,7 @@ from supabase import create_client
 # =========================================================
 # 0) 기본 UI 설정 (와이드 모드)
 # =========================================================
-st.set_page_config(page_title="천안공장 HACCP 개선관리", layout="wide")
+st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide")
 
 st.markdown("""
 <style>
@@ -26,7 +26,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏭 천안공장 HACCP 개선관리")
+st.title("🏭 천안공장 위생생 개선관리")
 
 
 # =========================================================
