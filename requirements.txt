@@ -2,6 +2,7 @@ streamlit
 pandas
 altair
 supabase
-pillow
-openpyxl
+storage3
 requests
+Pillow
+xlsxwriter
