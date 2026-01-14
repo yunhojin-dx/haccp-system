@@ -2,7 +2,7 @@ streamlit
 pandas
 altair
 supabase
-storage3
 requests
 Pillow
 xlsxwriter
+pyarrow
