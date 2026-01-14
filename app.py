@@ -1,144 +1,89 @@
-import io
 import os
-import uuid
+import io
 import json
-import time
-import datetime as dt
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Tuple
+import uuid
+import math
+import tempfile
+from datetime import date, datetime, timedelta
 
-import streamlit as st
+import requests
 import pandas as pd
+import streamlit as st
 import altair as alt
+from PIL import Image
 
-# 이미지 리사이즈/압축
-try:
-    from PIL import Image
-    PIL_OK = True
-except Exception:
-    PIL_OK = False
-
-# Supabase
-try:
-    from supabase import create_client
-    SUPABASE_OK = True
-except Exception:
-    SUPABASE_OK = False
-
-# 엑셀 생성
-try:
-    import openpyxl
-    from openpyxl.utils import get_column_letter
-    from openpyxl.styles import Font, Alignment
-    OPENPYXL_OK = True
-except Exception:
-    OPENPYXL_OK = False
+from supabase import create_client
 
 
-# =========================
-# 기본 설정
-# =========================
-APP_TITLE = "천안공장 HACCP 개선과제 시스템"
-TABLE_TASKS = "haccp_tasks"
-TABLE_PHOTOS = "haccp_task_photos"
+# =========================================================
+# 0) 기본 UI
+# =========================================================
+st.set_page_config(page_title="천안공장 HACCP 개선관리", layout="wide")
 
-STATUS_REGISTERED = "개선과제등록"
-STATUS_PLANNED = "개선계획수립"
-STATUS_DONE = "개선완료"
+st.markdown("""
+<style>
+.small-muted {color:#666; font-size:12px;}
+.badge {display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; background:#f2f2f2;}
+</style>
+""", unsafe_allow_html=True)
 
-ALL_STATUSES = [STATUS_REGISTERED, STATUS_PLANNED, STATUS_DONE]
-
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-
-
-# =========================
-# 유틸
-# =========================
-def today_date() -> dt.date:
-    return dt.date.today()
-
-def parse_date_safe(x) -> Optional[dt.date]:
-    if x is None or x == "":
-        return None
-    if isinstance(x, dt.date) and not isinstance(x, dt.datetime):
-        return x
-    if isinstance(x, dt.datetime):
-        return x.date()
-    try:
-        return dt.date.fromisoformat(str(x)[:10])
-    except Exception:
-        return None
-
-def iso_date(x: Optional[dt.date]) -> Optional[str]:
-    if not x:
-        return None
-    return x.isoformat()
-
-def now_iso() -> str:
-    return dt.datetime.utcnow().isoformat()
-
-def require_packages_or_stop():
-    missing = []
-    if not SUPABASE_OK:
-        missing.append("supabase")
-    if not PIL_OK:
-        missing.append("Pillow(PIL)")
-    if not OPENPYXL_OK:
-        missing.append("openpyxl")
-    if missing:
-        st.error(
-            "필수 라이브러리가 설치되지 않았습니다: "
-            + ", ".join(missing)
-            + "\n\nrequirements.txt에 추가 후 재배포하세요."
-        )
-        st.stop()
-
-def require_secrets_or_stop(keys: List[str]):
-    missing = [k for k in keys if k not in st.secrets or not str(st.secrets.get(k, "")).strip()]
-    if missing:
-        st.error("🚨 Secrets 누락: " + ", ".join(missing))
-        st.stop()
-
-def human_period_label(granularity: str) -> str:
-    return "주간" if granularity == "weekly" else "월간"
-
-def start_of_week(d: dt.date) -> dt.date:
-    # 월요일 시작
-    return d - dt.timedelta(days=d.weekday())
-
-def month_start(d: dt.date) -> dt.date:
-    return dt.date(d.year, d.month, 1)
+st.title("천안공장 HACCP 개선관리")
 
 
-# =========================
-# Supabase 연결
-# =========================
+# =========================================================
+# 1) Secrets 체크
+# =========================================================
+REQUIRED_SECRETS = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_BUCKET"]
+missing = [k for k in REQUIRED_SECRETS if k not in st.secrets or not str(st.secrets.get(k, "")).strip()]
+if missing:
+    st.error(f"🚨 Secrets 누락: {', '.join(missing)}")
+    st.info("Streamlit → App Settings → Secrets 에 TOML 형식으로 등록해 주세요.")
+    st.stop()
+
+SUPABASE_URL = st.secrets["SUPABASE_URL"].strip()
+SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"].strip()
+SUPABASE_SERVICE_KEY = st.secrets["SUPABASE_SERVICE_KEY"].strip()
+BUCKET = st.secrets["SUPABASE_BUCKET"].strip()
+
+
+# =========================================================
+# 2) Supabase 연결 (가장 안정적으로: service_role 사용)
+# =========================================================
 @st.cache_resource
-def sb():
-    require_secrets_or_stop(["SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_BUCKET"])
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_SERVICE_KEY"]  # 안정적으로 CRUD하려면 서비스키 권장
-    return create_client(url, key)
+def get_supabase():
+    # service role 키로 서버 사이드에서만 사용(스트림릿 시크릿)
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-def bucket_name() -> str:
-    return st.secrets["SUPABASE_BUCKET"]
+sb = get_supabase()
 
 
-# =========================
-# 이미지 처리
-# =========================
-def compress_image(file_bytes: bytes, max_w: int = 1600, quality: int = 82) -> Tuple[bytes, str]:
+# =========================================================
+# 3) 유틸: 날짜/기간
+# =========================================================
+def start_of_week(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+def end_of_week(d: date) -> date:
+    return start_of_week(d) + timedelta(days=6)
+
+def start_of_month(d: date) -> date:
+    return d.replace(day=1)
+
+def end_of_month(d: date) -> date:
+    nxt = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return nxt - timedelta(days=1)
+
+
+# =========================================================
+# 4) 유틸: 이미지 리사이즈/압축 + 업로드
+# =========================================================
+def compress_image(file_bytes: bytes, max_w=1280, quality=80) -> tuple[bytes, str]:
     """
-    - 입력: 원본 bytes
-    - 출력: 압축된 JPEG bytes, 확장자("jpg")
+    return: (compressed_bytes, ext)
+    - 업로드는 jpg로 통일 (용량/호환 안정)
     """
-    if not PIL_OK:
-        # Pillow 없으면 원본 반환 (그래도 동작은 하게)
-        return file_bytes, "bin"
-
     img = Image.open(io.BytesIO(file_bytes))
     img = img.convert("RGB")
-
     w, h = img.size
     if w > max_w:
         new_h = int(h * (max_w / w))
@@ -148,567 +93,553 @@ def compress_image(file_bytes: bytes, max_w: int = 1600, quality: int = 82) -> T
     img.save(out, format="JPEG", quality=quality, optimize=True)
     return out.getvalue(), "jpg"
 
+def make_public_url(bucket: str, path: str) -> str:
+    # Supabase public bucket 기준
+    return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
 
-# =========================
-# DB/Storage 작업
-# =========================
-def fetch_tasks(limit: int = 2000) -> pd.DataFrame:
-    client = sb()
-    res = client.table(TABLE_TASKS).select("*").order("created_at", desc=True).limit(limit).execute()
-    rows = res.data or []
-    df = pd.DataFrame(rows)
-    if df.empty:
-        # 컬럼 기본 세팅
-        df = pd.DataFrame(columns=[
-            "id","created_at","issue_date","location","issue_text","reporter",
-            "status","assignee","plan_due_date","action_text","action_date"
-        ])
-    # 날짜 변환
-    for c in ["issue_date","plan_due_date","action_date"]:
-        if c in df.columns:
-            df[c] = df[c].apply(parse_date_safe)
-    return df
+def upload_photo(task_id: str, uploaded_file) -> dict:
+    raw = uploaded_file.read()
+    compressed, ext = compress_image(raw, max_w=1400, quality=82)
 
-def fetch_photos_for_task(task_id: str) -> pd.DataFrame:
-    client = sb()
-    res = client.table(TABLE_PHOTOS).select("*").eq("task_id", task_id).order("uploaded_at", desc=False).execute()
-    rows = res.data or []
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["id","task_id","file_path","public_url","uploaded_at"])
+    # 경로: task_id/날짜_uuid.jpg
+    key = f"{task_id}/{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
 
-def create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
-    client = sb()
-    res = client.table(TABLE_TASKS).insert(payload).execute()
-    if not res.data:
-        raise RuntimeError("DB insert 실패")
-    return res.data[0]
-
-def update_task(task_id: str, patch: Dict[str, Any]) -> None:
-    client = sb()
-    client.table(TABLE_TASKS).update(patch).eq("id", task_id).execute()
-
-def delete_task(task_id: str) -> None:
-    # 사진 먼저 삭제
-    photos = fetch_photos_for_task(task_id)
-    for _, r in photos.iterrows():
-        try:
-            delete_photo(r["id"], r["file_path"])
-        except Exception:
-            pass
-    client = sb()
-    client.table(TABLE_TASKS).delete().eq("id", task_id).execute()
-
-def upload_photo(task_id: str, original_name: str, file_bytes: bytes) -> Dict[str, Any]:
-    client = sb()
-    bname = bucket_name()
-
-    # 압축/리사이즈
-    compressed_bytes, ext = compress_image(file_bytes)
-
-    safe_name = os.path.splitext(original_name)[0].replace(" ", "_")
-    file_id = str(uuid.uuid4())
-    path = f"{task_id}/{file_id}_{safe_name}.{ext}"
-
-    # 업로드 (중복 방지: upsert=False)
-    client.storage.from_(bname).upload(
-        path=path,
-        file=compressed_bytes,
-        file_options={"content-type": "image/jpeg" if ext == "jpg" else "application/octet-stream"}
+    # 업로드
+    sb.storage.from_(BUCKET).upload(
+        path=key,
+        file=compressed,
+        file_options={"content-type": "image/jpeg", "upsert": "false"},
     )
 
-    # public url
-    public_url = client.storage.from_(bname).get_public_url(path)
+    url = make_public_url(BUCKET, key)
 
     # DB 기록
-    ins = {
+    row = {
         "task_id": task_id,
-        "file_path": path,
-        "public_url": public_url,
+        "storage_path": key,
+        "public_url": url
     }
-    res = client.table(TABLE_PHOTOS).insert(ins).execute()
-    if not res.data:
-        raise RuntimeError("사진 메타 insert 실패")
-    return res.data[0]
+    sb.table("haccp_task_photos").insert(row).execute()
+    return row
 
-def delete_photo(photo_id: str, file_path: str) -> None:
-    client = sb()
-    bname = bucket_name()
+def delete_photo(photo_id: str, storage_path: str):
     # storage 삭제
     try:
-        client.storage.from_(bname).remove([file_path])
+        sb.storage.from_(BUCKET).remove([storage_path])
     except Exception:
-        # storage 실패해도 메타 삭제는 진행(잔여파일은 나중에 정리 가능)
+        # storage 삭제 실패해도 DB는 지울 수 있게
         pass
-    # db 삭제
-    client.table(TABLE_PHOTOS).delete().eq("id", photo_id).execute()
-
-def replace_photo(photo_id: str, old_path: str, task_id: str, original_name: str, file_bytes: bytes) -> None:
-    # 새 업로드
-    new_meta = upload_photo(task_id, original_name, file_bytes)
-    # 기존 삭제(새 업로드 성공 후)
-    delete_photo(photo_id, old_path)
-    # (선택) 새 사진을 "대표"로 만들고 싶으면 여기서 정렬/플래그 로직 추가 가능
+    # DB 삭제
+    sb.table("haccp_task_photos").delete().eq("id", photo_id).execute()
 
 
-# =========================
-# 리포트/엑셀
-# =========================
-def filter_by_period(df: pd.DataFrame, start: dt.date, end: dt.date) -> pd.DataFrame:
-    if df.empty:
-        return df
-    # issue_date 기준
-    m = df["issue_date"].apply(lambda d: d is not None and start <= d <= end)
-    return df[m].copy()
+# =========================================================
+# 5) DB 함수 (tasks)
+# =========================================================
+def fetch_tasks(date_from: date | None = None, date_to: date | None = None) -> list[dict]:
+    q = sb.table("v_haccp_tasks").select("*").order("issue_date", desc=True).order("created_at", desc=True)
+    if date_from:
+        q = q.gte("issue_date", str(date_from))
+    if date_to:
+        q = q.lte("issue_date", str(date_to))
+    res = q.execute()
+    return res.data or []
 
-def summarize(df: pd.DataFrame) -> Dict[str, Any]:
-    total = len(df)
-    done = int((df["status"] == STATUS_DONE).sum()) if not df.empty else 0
-    by_loc = (df.groupby("location")["id"].count().sort_values(ascending=False).reset_index(name="count")
-              if not df.empty else pd.DataFrame(columns=["location","count"]))
-    by_status = (df.groupby("status")["id"].count().reindex(ALL_STATUSES).fillna(0).reset_index(name="count")
-                 if not df.empty else pd.DataFrame({"status": ALL_STATUSES, "count":[0,0,0]}))
-    return {"total": total, "done": done, "by_loc": by_loc, "by_status": by_status}
+def fetch_task(task_id: str) -> dict | None:
+    res = sb.table("v_haccp_tasks").select("*").eq("id", task_id).limit(1).execute()
+    data = res.data or []
+    return data[0] if data else None
 
-def build_timeseries(df: pd.DataFrame, granularity: str) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=["period","발굴","완료"])
+def insert_task(issue_date: date, location: str, issue_text: str, reporter: str) -> str:
+    row = {
+        "issue_date": str(issue_date),
+        "location": location.strip(),
+        "issue_text": issue_text.strip(),
+        "reporter": reporter.strip(),
+        "status": "진행중"
+    }
+    res = sb.table("haccp_tasks").insert(row).execute()
+    return res.data[0]["id"]
 
+def update_task(task_id: str, patch: dict):
+    sb.table("haccp_tasks").update(patch).eq("id", task_id).execute()
+
+def mark_done_if_action_exists(task_id: str):
+    t = fetch_task(task_id)
+    if not t:
+        return
+    if (t.get("action_text") or "").strip():
+        update_task(task_id, {"status": "완료"})
+    else:
+        # action 지우면 상태를 자동으로 되돌리진 않음(혼란 방지)
+        pass
+
+
+# =========================================================
+# 6) 엑셀(사진 포함) 내보내기
+# =========================================================
+def download_image_to_temp(url: str) -> str | None:
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        fd, path = tempfile.mkstemp(suffix=".jpg")
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(r.content)
+        return path
+    except Exception:
+        return None
+
+def export_excel(tasks: list[dict], filename_prefix="HACCP_보고서") -> bytes:
+    # 데이터프레임
     rows = []
-    for _, r in df.iterrows():
-        d = r["issue_date"]
-        if not d:
-            continue
-        if granularity == "weekly":
-            p = start_of_week(d)
-        else:
-            p = month_start(d)
-        rows.append((p, 1, 1 if r["status"] == STATUS_DONE else 0))
-
-    ts = pd.DataFrame(rows, columns=["period","발굴","완료"])
-    if ts.empty:
-        return pd.DataFrame(columns=["period","발굴","완료"])
-    ts = ts.groupby("period")[["발굴","완료"]].sum().reset_index()
-    ts["period_str"] = ts["period"].astype(str)
-    return ts.sort_values("period")
-
-def export_excel_links(tasks_df: pd.DataFrame) -> bytes:
-    """
-    기본: 사진은 '하이퍼링크'로 제공 (가장 안정적)
-    """
-    if not OPENPYXL_OK:
-        raise RuntimeError("openpyxl 미설치")
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "리포트"
-
-    headers = [
-        "발굴일", "공정/장소", "개선 필요사항", "발견자",
-        "진행상태", "담당자", "개선계획일", "개선내용", "개선완료일", "사진(링크)"
-    ]
-    ws.append(headers)
-    for c in range(1, len(headers)+1):
-        cell = ws.cell(row=1, column=c)
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(wrap_text=True, vertical="top")
-
-    # task별 사진 링크 1줄로 합치기
-    client = sb()
-
-    for i, r in tasks_df.reset_index(drop=True).iterrows():
-        task_id = r["id"]
-        photos = client.table(TABLE_PHOTOS).select("public_url").eq("task_id", task_id).execute().data or []
-        links = [p["public_url"] for p in photos if p.get("public_url")]
-        link_text = " | ".join(links) if links else ""
-
-        ws.append([
-            iso_date(r.get("issue_date")),
-            r.get("location",""),
-            r.get("issue_text",""),
-            r.get("reporter",""),
-            r.get("status",""),
-            r.get("assignee",""),
-            iso_date(r.get("plan_due_date")),
-            r.get("action_text",""),
-            iso_date(r.get("action_date")),
-            link_text
-        ])
-
-    # 열 너비/줄바꿈
-    for col in range(1, len(headers)+1):
-        ws.column_dimensions[get_column_letter(col)].width = 22
-    ws.column_dimensions["C"].width = 45
-    ws.column_dimensions["I"].width = 14
-    ws.column_dimensions["J"].width = 55
-
-    for row in range(2, ws.max_row+1):
-        ws.cell(row=row, column=3).alignment = Alignment(wrap_text=True, vertical="top")
-        ws.cell(row=row, column=9).alignment = Alignment(wrap_text=True, vertical="top")
-        ws.cell(row=row, column=10).alignment = Alignment(wrap_text=True, vertical="top")
+    for t in tasks:
+        rows.append({
+            "ID": t.get("legacy_id") or t["id"],
+            "일시": t.get("issue_date"),
+            "공정/장소": t.get("location"),
+            "개선 필요사항": t.get("issue_text"),
+            "발견자": t.get("reporter"),
+            "진행상태": t.get("status"),
+            "담당자": t.get("assignee"),
+            "개선계획(일정)": t.get("plan_due"),
+            "개선계획(내용)": t.get("plan_text"),
+            "개선내용": t.get("action_text"),
+            "개선완료일": t.get("action_done_date"),
+        })
+    df = pd.DataFrame(rows)
 
     out = io.BytesIO()
-    wb.save(out)
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        # 1) 데이터 시트
+        sheet_data = "데이터"
+        df.to_excel(writer, sheet_name=sheet_data, index=False, startrow=1)
+        wb = writer.book
+        ws = writer.sheets[sheet_data]
+
+        # 헤더 스타일
+        header_fmt = wb.add_format({"bold": True, "bg_color": "#EFEFEF", "border": 1})
+        for col, name in enumerate(df.columns):
+            ws.write(0, col, name, header_fmt)
+
+        # 열 폭
+        ws.set_column(0, 0, 36)  # ID
+        ws.set_column(1, 1, 12)  # 일시
+        ws.set_column(2, 2, 16)  # 장소
+        ws.set_column(3, 3, 40)  # 필요사항
+        ws.set_column(4, 4, 14)  # 발견자
+        ws.set_column(5, 5, 10)  # 상태
+        ws.set_column(6, 6, 14)  # 담당자
+        ws.set_column(7, 7, 14)  # 계획일정
+        ws.set_column(8, 8, 28)  # 계획내용
+        ws.set_column(9, 9, 28)  # 개선내용
+        ws.set_column(10, 10, 14) # 완료일
+
+        # 사진 칼럼 3개 추가
+        img_cols = ["사진1", "사진2", "사진3"]
+        base_col = len(df.columns)
+        for i, c in enumerate(img_cols):
+            ws.write(0, base_col + i, c, header_fmt)
+            ws.set_column(base_col + i, base_col + i, 22)
+
+        # 행 높이(사진 들어갈 공간)
+        for r in range(1, len(df) + 1):
+            ws.set_row(r, 120)
+
+        # 사진 삽입(최대 3장)
+        for idx, t in enumerate(tasks):
+            photos = t.get("photos") or []
+            try:
+                if isinstance(photos, str):
+                    photos = json.loads(photos)
+            except Exception:
+                photos = []
+            photos = photos[:3]
+
+            for j, p in enumerate(photos):
+                url = p.get("public_url")
+                if not url:
+                    continue
+                img_path = download_image_to_temp(url)
+                if not img_path:
+                    continue
+                # 행/열 위치
+                row = idx + 1
+                col = base_col + j
+                ws.insert_image(row, col, img_path, {"x_scale": 0.35, "y_scale": 0.35})
+                # 임시파일 삭제는 xlsxwriter가 참조할 수 있으므로 저장 후 정리하는 게 정석이지만,
+                # 스트림릿 환경에서 문제를 줄이기 위해 여기선 남겨둠(서버 임시영역).
+
+        # 2) 요약 시트
+        sheet_sum = "요약"
+        ws2 = wb.add_worksheet(sheet_sum)
+
+        total = len(tasks)
+        done = sum(1 for t in tasks if t.get("status") == "완료")
+        rate = (done / total * 100) if total else 0.0
+
+        ws2.write(0, 0, "HACCP 개선 보고서", wb.add_format({"bold": True, "font_size": 16}))
+        ws2.write(2, 0, "총 발굴건수"); ws2.write(2, 1, total)
+        ws2.write(3, 0, "개선완료 건수"); ws2.write(3, 1, done)
+        ws2.write(4, 0, "완료율(%)"); ws2.write(4, 1, round(rate, 1))
+
+        # 장소별 집계 표
+        loc = {}
+        for t in tasks:
+            k = (t.get("location") or "미분류").strip()
+            loc.setdefault(k, {"발굴": 0, "완료": 0})
+            loc[k]["발굴"] += 1
+            if t.get("status") == "완료":
+                loc[k]["완료"] += 1
+
+        ws2.write(6, 0, "공정/장소"); ws2.write(6, 1, "발굴"); ws2.write(6, 2, "완료")
+        r0 = 7
+        for i, (k, v) in enumerate(sorted(loc.items(), key=lambda x: x[0])):
+            ws2.write(r0 + i, 0, k)
+            ws2.write(r0 + i, 1, v["발굴"])
+            ws2.write(r0 + i, 2, v["완료"])
+
+        ws2.set_column(0, 0, 22)
+        ws2.set_column(1, 2, 10)
+
     return out.getvalue()
 
 
-# =========================
-# UI 구성
-# =========================
-require_packages_or_stop()
-
-st.title(APP_TITLE)
-
-# 상단 안내/상태
-with st.expander("✅ 운영 체크(필수 설정 확인)", expanded=False):
-    st.write("아래 항목이 모두 OK면 앱은 안정적으로 동작합니다.")
-    ok = True
-    for k in ["SUPABASE_URL","SUPABASE_ANON_KEY","SUPABASE_SERVICE_KEY","SUPABASE_BUCKET"]:
-        v = str(st.secrets.get(k, "")).strip()
-        st.write(f"- {k}: {'OK' if v else '❌ 누락'}")
-        ok = ok and bool(v)
-    if not ok:
-        st.warning("Secrets를 먼저 채워주세요. (App settings → Secrets)")
-        st.stop()
-
-# 데이터 로드
-df_all = fetch_tasks()
-
+# =========================================================
+# 7) 화면: 탭 구성
+# =========================================================
 tabs = st.tabs([
     "대시보드/보고서",
     "개선과제등록",
     "개선계획수립",
     "개선완료 입력",
-    "조회/관리"
+    "조회/관리",
 ])
 
-# =========================
-# 1) 대시보드/보고서
-# =========================
+# ---------------------------------------------------------
+# (A) 대시보드/보고서
+# ---------------------------------------------------------
 with tabs[0]:
     st.subheader("대시보드/보고서")
 
-    colA, colB, colC = st.columns([1,1,2])
-    with colA:
-        granularity = st.radio("집계 단위", ["weekly","monthly"], format_func=human_period_label, horizontal=True)
-    with colB:
-        start = st.date_input("시작일", value=today_date() - dt.timedelta(days=30))
-    with colC:
-        end = st.date_input("종료일", value=today_date())
+    c1, c2, c3 = st.columns([1.2, 1.2, 2])
 
-    df = filter_by_period(df_all, start, end)
-    s = summarize(df)
+    with c1:
+        period_type = st.selectbox("기간 단위", ["주간", "월간", "직접선택"], index=0)
+
+    today = date.today()
+    if period_type == "주간":
+        base = st.date_input("기준일", value=today)
+        d_from = start_of_week(base)
+        d_to = end_of_week(base)
+    elif period_type == "월간":
+        base = st.date_input("기준월(아무 날짜)", value=today)
+        d_from = start_of_month(base)
+        d_to = end_of_month(base)
+    else:
+        with c2:
+            d_from = st.date_input("시작일", value=today - timedelta(days=30))
+        with c3:
+            d_to = st.date_input("종료일", value=today)
+
+    tasks = fetch_tasks(d_from, d_to)
+
+    total = len(tasks)
+    done = sum(1 for t in tasks if t.get("status") == "완료")
+    rate = (done / total * 100) if total else 0.0
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("총 발굴건수", s["total"])
-    m2.metric("개선완료 건수", s["done"])
-    m3.metric("완료율", f"{(s['done']/s['total']*100):.1f}%" if s["total"] else "0.0%")
+    m1.metric("총 발굴건수", total)
+    m2.metric("개선완료 건수", done)
+    m3.metric("완료율", f"{rate:.1f}%")
 
-    ts = build_timeseries(df, granularity)
-    if not ts.empty:
-        chart = alt.Chart(ts).transform_fold(
-            ["발굴","완료"], as_=["구분","건수"]
-        ).mark_line(point=True).encode(
-            x=alt.X("period_str:N", title="기간"),
-            y=alt.Y("건수:Q", title="건수"),
-            color="구분:N"
-        )
-        st.altair_chart(chart, use_container_width=True)
-    else:
+    # 장소별
+    df_loc = pd.DataFrame([{
+        "공정/장소": (t.get("location") or "미분류").strip(),
+        "상태": t.get("status")
+    } for t in tasks])
+
+    if total == 0:
         st.info("선택한 기간에 데이터가 없습니다.")
+    else:
+        loc_pivot = (
+            df_loc.assign(발굴=1, 완료=(df_loc["상태"] == "완료").astype(int))
+            .groupby("공정/장소", as_index=False)[["발굴", "완료"]].sum()
+        )
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write("공정(실)별 발굴 건수")
-        if not s["by_loc"].empty:
-            st.dataframe(s["by_loc"], use_container_width=True, hide_index=True)
-        else:
-            st.write("-")
+        st.markdown("#### 공정/장소별 발굴 vs 완료")
+        chart1 = alt.Chart(loc_pivot).transform_fold(
+            ["발굴", "완료"], as_=["구분", "건수"]
+        ).mark_bar().encode(
+            x=alt.X("공정/장소:N", sort="-y"),
+            y="건수:Q",
+            xOffset="구분:N",
+            tooltip=["공정/장소", "구분", "건수"]
+        ).properties(height=360)
 
-    with c2:
-        st.write("진행상태별 건수")
-        if not s["by_status"].empty:
-            st.dataframe(s["by_status"], use_container_width=True, hide_index=True)
-        else:
-            st.write("-")
+        st.altair_chart(chart1, use_container_width=True)
 
-    st.divider()
-    st.subheader("보고서/엑셀 출력")
+        # 날짜별 추이
+        df_day = pd.DataFrame([{
+            "일자": t.get("issue_date"),
+            "발굴": 1,
+            "완료": 1 if t.get("status") == "완료" else 0
+        } for t in tasks])
+        df_day["일자"] = pd.to_datetime(df_day["일자"])
+        df_day = df_day.groupby("일자", as_index=False)[["발굴", "완료"]].sum().sort_values("일자")
 
-    if st.button("📄 엑셀 다운로드 생성(사진 링크 포함)", type="primary"):
-        if df.empty:
-            st.warning("다운로드할 데이터가 없습니다.")
-        else:
-            try:
-                xlsx_bytes = export_excel_links(df)
-                st.download_button(
-                    "⬇️ HACCP_리포트.xlsx 다운로드",
-                    data=xlsx_bytes,
-                    file_name=f"HACCP_리포트_{start}_{end}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                st.success("엑셀 생성 완료!")
-            except Exception as e:
-                st.error(f"엑셀 생성 실패: {e}")
+        st.markdown("#### 일자별 추이")
+        chart2 = alt.Chart(df_day).transform_fold(
+            ["발굴", "완료"], as_=["구분", "건수"]
+        ).mark_line(point=True).encode(
+            x="일자:T",
+            y="건수:Q",
+            color="구분:N",
+            tooltip=["일자:T", "구분:N", "건수:Q"]
+        ).properties(height=320)
+
+        st.altair_chart(chart2, use_container_width=True)
+
+        st.divider()
+        st.markdown("#### 엑셀 보고서 다운로드 (사진 포함)")
+        if st.button("📥 엑셀로 다운로드", type="primary"):
+            xbytes = export_excel(tasks)
+            fn = f"HACCP_보고서_{d_from}_{d_to}.xlsx"
+            st.download_button("⬇️ 다운로드", data=xbytes, file_name=fn, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
-# =========================
-# 2) 개선과제등록
-# =========================
+# ---------------------------------------------------------
+# (B) 개선과제등록
+# ---------------------------------------------------------
 with tabs[1]:
     st.subheader("개선과제등록 (발굴/등록)")
 
     with st.form("form_register", clear_on_submit=True):
-        c1, c2, c3 = st.columns([1,1,2])
-        issue_date = c1.date_input("일시", value=today_date())
-        location = c2.text_input("공정/장소", placeholder="예: 전처리실")
-        reporter = c3.text_input("발견자", placeholder="예: 품질보증팀")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            issue_date = st.date_input("일시", value=date.today())
+        with col2:
+            location = st.text_input("공정/장소", placeholder="예: 전처리실")
+        with col3:
+            reporter = st.text_input("발견자", placeholder="예: 품질보증팀")
 
-        issue_text = st.text_area("개선 필요사항", height=120, placeholder="무엇이 문제인지 구체적으로 작성")
+        issue_text = st.text_area("개선 필요사항", placeholder="무엇이 문제인지 구체적으로 작성", height=120)
 
-        st.caption("사진은 여러 장 업로드 가능 (자동 리사이즈/압축)")
-        photos = st.file_uploader(
-            "사진 업로드",
-            type=["jpg","jpeg","png","webp"],
-            accept_multiple_files=True
-        )
+        st.caption("사진은 여러 장 업로드 가능 (자동 리사이즈/압축 후 저장)")
+        photos = st.file_uploader("사진 업로드", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
 
         submitted = st.form_submit_button("✅ 등록하기", type="primary")
 
     if submitted:
-        if not location.strip():
-            st.warning("공정/장소를 입력하세요.")
-            st.stop()
-        if not reporter.strip():
-            st.warning("발견자를 입력하세요.")
-            st.stop()
-        if not issue_text.strip():
-            st.warning("개선 필요사항을 입력하세요.")
-            st.stop()
+        if not (location.strip() and reporter.strip() and issue_text.strip()):
+            st.error("공정/장소, 발견자, 개선 필요사항은 필수입니다.")
+        else:
+            try:
+                task_id = insert_task(issue_date, location, issue_text, reporter)
 
-        try:
-            payload = {
-                "issue_date": iso_date(issue_date),
-                "location": location.strip(),
-                "issue_text": issue_text.strip(),
-                "reporter": reporter.strip(),
-                "status": STATUS_REGISTERED,
-                "assignee": None,
-                "plan_due_date": None,
-                "action_text": None,
-                "action_date": None,
-            }
-            new_task = create_task(payload)
-            task_id = new_task["id"]
+                # 사진 업로드
+                if photos:
+                    for f in photos:
+                        upload_photo(task_id, f)
 
-            # 사진 업로드
-            uploaded = 0
-            if photos:
-                for f in photos:
-                    upload_photo(task_id, f.name, f.getvalue())
-                    uploaded += 1
-
-            st.success(f"등록 완료! (사진 {uploaded}장 업로드)")
-            st.rerun()
-        except Exception as e:
-            st.error(f"등록 실패: {e}")
+                st.success("등록 완료!")
+                st.info("다음 탭에서 ‘개선계획수립 → 개선완료 입력’ 순서로 진행하세요.")
+            except Exception as e:
+                st.error("등록 실패")
+                st.exception(e)
 
 
-# =========================
-# 3) 개선계획수립
-# =========================
+# ---------------------------------------------------------
+# (C) 개선계획수립
+# ---------------------------------------------------------
 with tabs[2]:
     st.subheader("개선계획수립 (담당자/일정 지정)")
 
-    df_plan = df_all[df_all["status"].isin([STATUS_REGISTERED, STATUS_PLANNED])].copy()
-    if df_plan.empty:
-        st.info("계획수립 대상이 없습니다.")
+    tasks = fetch_tasks(None, None)
+    if not tasks:
+        st.info("등록된 개선과제가 없습니다.")
     else:
-        df_plan["표시"] = df_plan.apply(
-            lambda r: f"[{r['status']}] {r.get('issue_date')} / {r.get('location','')} / {str(r.get('issue_text',''))[:40]}",
-            axis=1
-        )
-        pick = st.selectbox("대상 선택", df_plan["표시"].tolist())
-        row = df_plan[df_plan["표시"] == pick].iloc[0].to_dict()
-        task_id = row["id"]
+        options = [f"{t.get('issue_date')} | {t.get('location')} | {t.get('issue_text')[:30]}... ({t.get('status')})" for t in tasks]
+        sel = st.selectbox("대상 선택", options, index=0)
+        idx = options.index(sel)
+        t = tasks[idx]
 
-        st.write("**개선 필요사항**")
-        st.write(row.get("issue_text",""))
+        st.write(f"**선택된 과제:** {t.get('issue_text')}")
+        st.write(f"- 발견자: {t.get('reporter')}  /  상태: {t.get('status')}")
 
-        c1, c2, c3 = st.columns([1,1,2])
-        assignee = c1.text_input("담당자(팀/부서)", value=row.get("assignee") or "")
-        plan_due = c2.date_input("개선계획(일정)", value=row.get("plan_due_date") or today_date())
-        status_now = c3.selectbox("진행상태", [STATUS_REGISTERED, STATUS_PLANNED], index=1 if row["status"]==STATUS_PLANNED else 0)
+        with st.form("form_plan"):
+            assignee = st.text_input("담당자", value=t.get("assignee") or "", placeholder="예: 생산팀/공무팀/홍길동")
+            plan_due = st.date_input("개선계획(일정)", value=pd.to_datetime(t.get("plan_due")).date() if t.get("plan_due") else date.today())
+            plan_text = st.text_area("개선계획(내용)", value=t.get("plan_text") or "", height=120)
+            ok = st.form_submit_button("💾 저장", type="primary")
 
-        if st.button("💾 계획 저장", type="primary"):
+        if ok:
             try:
-                update_task(task_id, {
-                    "assignee": assignee.strip() if assignee.strip() else None,
-                    "plan_due_date": iso_date(plan_due),
-                    "status": status_now
+                update_task(t["id"], {
+                    "assignee": assignee.strip() if assignee else None,
+                    "plan_due": str(plan_due) if plan_due else None,
+                    "plan_text": plan_text.strip() if plan_text else None,
                 })
                 st.success("저장 완료")
-                st.rerun()
             except Exception as e:
-                st.error(f"저장 실패: {e}")
-
-        st.divider()
-        st.write("### 사진")
-        photos_df = fetch_photos_for_task(task_id)
-        if photos_df.empty:
-            st.caption("등록된 사진이 없습니다.")
-        else:
-            # 그리드 출력
-            cols = st.columns(3)
-            for i, r in photos_df.iterrows():
-                with cols[i % 3]:
-                    st.image(r["public_url"], use_container_width=True)
-                    cdel, crep = st.columns(2)
-                    with cdel:
-                        if st.button("삭제", key=f"del_{r['id']}"):
-                            try:
-                                delete_photo(r["id"], r["file_path"])
-                                st.success("삭제 완료")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"삭제 실패: {e}")
-                    with crep:
-                        newf = st.file_uploader("교체", type=["jpg","jpeg","png","webp"], key=f"rep_{r['id']}")
-                        if newf is not None:
-                            if st.button("교체 적용", key=f"repbtn_{r['id']}"):
-                                try:
-                                    replace_photo(r["id"], r["file_path"], task_id, newf.name, newf.getvalue())
-                                    st.success("교체 완료")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"교체 실패: {e}")
-
-        st.divider()
-        st.write("### 사진 추가 업로드")
-        add_files = st.file_uploader("추가 사진", type=["jpg","jpeg","png","webp"], accept_multiple_files=True, key="plan_add_photos")
-        if st.button("➕ 추가 업로드"):
-            if not add_files:
-                st.warning("추가할 사진을 선택하세요.")
-            else:
-                try:
-                    for f in add_files:
-                        upload_photo(task_id, f.name, f.getvalue())
-                    st.success("추가 업로드 완료")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"업로드 실패: {e}")
+                st.error("저장 실패")
+                st.exception(e)
 
 
-# =========================
-# 4) 개선완료 입력
-# =========================
+# ---------------------------------------------------------
+# (D) 개선완료 입력
+# ---------------------------------------------------------
 with tabs[3]:
-    st.subheader("개선완료 입력 (조치내용/완료일)")
+    st.subheader("개선완료 입력")
 
-    df_done = df_all.copy()
-    if df_done.empty:
-        st.info("데이터가 없습니다.")
+    tasks = fetch_tasks(None, None)
+    if not tasks:
+        st.info("등록된 개선과제가 없습니다.")
     else:
-        df_done["표시"] = df_done.apply(
-            lambda r: f"[{r['status']}] {r.get('issue_date')} / {r.get('location','')} / {str(r.get('issue_text',''))[:40]}",
-            axis=1
-        )
-        pick = st.selectbox("대상 선택", df_done["표시"].tolist())
-        row = df_done[df_done["표시"] == pick].iloc[0].to_dict()
-        task_id = row["id"]
+        options = [f"{t.get('issue_date')} | {t.get('location')} | {t.get('issue_text')[:30]}... ({t.get('status')})" for t in tasks]
+        sel = st.selectbox("대상 선택", options, index=0, key="done_select")
+        idx = options.index(sel)
+        t = tasks[idx]
 
-        st.write("**개선 필요사항**")
-        st.write(row.get("issue_text",""))
+        st.write(f"**선택된 과제:** {t.get('issue_text')}")
+        st.write(f"- 담당자: {t.get('assignee') or '-'}  /  계획일정: {t.get('plan_due') or '-'}")
 
-        c1, c2 = st.columns([2,1])
-        action_text = c1.text_area("개선내용(조치내용)", value=row.get("action_text") or "", height=140)
-        action_date = c2.date_input("개선완료일", value=row.get("action_date") or today_date())
-        status_new = st.selectbox("진행상태", ALL_STATUSES, index=ALL_STATUSES.index(row.get("status") or STATUS_REGISTERED))
+        with st.form("form_done"):
+            action_text = st.text_area("개선내용", value=t.get("action_text") or "", height=140)
+            action_done_date = st.date_input(
+                "개선완료일",
+                value=pd.to_datetime(t.get("action_done_date")).date() if t.get("action_done_date") else date.today()
+            )
+            ok = st.form_submit_button("✅ 완료 저장", type="primary")
 
-        # 완료 버튼은 조치내용 없으면 막기(오류 최소)
-        if st.button("✅ 완료 저장", type="primary"):
-            if status_new == STATUS_DONE and not action_text.strip():
-                st.warning("완료 처리하려면 '개선내용'을 입력하세요.")
-                st.stop()
+        if ok:
             try:
-                update_task(task_id, {
-                    "action_text": action_text.strip() if action_text.strip() else None,
-                    "action_date": iso_date(action_date) if status_new == STATUS_DONE else iso_date(action_date),
-                    "status": status_new
+                update_task(t["id"], {
+                    "action_text": action_text.strip() if action_text else None,
+                    "action_done_date": str(action_done_date) if action_done_date else None,
+                    "status": "완료" if (action_text or "").strip() else t.get("status", "진행중")
                 })
                 st.success("저장 완료")
-                st.rerun()
             except Exception as e:
-                st.error(f"저장 실패: {e}")
-
-        st.divider()
-        st.write("### 사진(즉시 확인)")
-        photos_df = fetch_photos_for_task(task_id)
-        if photos_df.empty:
-            st.caption("등록된 사진이 없습니다.")
-        else:
-            cols = st.columns(3)
-            for i, r in photos_df.iterrows():
-                with cols[i % 3]:
-                    st.image(r["public_url"], use_container_width=True)
+                st.error("저장 실패")
+                st.exception(e)
 
 
-# =========================
-# 5) 조회/관리
-# =========================
+# ---------------------------------------------------------
+# (E) 조회/관리 (사진 삭제/추가, 상태 변경 등)
+# ---------------------------------------------------------
 with tabs[4]:
     st.subheader("조회/관리")
 
-    c1, c2, c3, c4 = st.columns([1,1,1,2])
-    with c1:
-        f_status = st.multiselect("상태", ALL_STATUSES, default=ALL_STATUSES)
-    with c2:
-        f_loc = st.text_input("공정/장소 필터", placeholder="예: 전처리")
-    with c3:
-        f_reporter = st.text_input("발견자 필터", placeholder="예: 품질")
-    with c4:
-        kw = st.text_input("키워드 검색", placeholder="개선 필요사항/개선내용 검색")
+    f1, f2, f3, f4 = st.columns([1.1, 1.1, 1, 1.2])
+    with f1:
+        d_from = st.date_input("시작일", value=date.today() - timedelta(days=30), key="m_from")
+    with f2:
+        d_to = st.date_input("종료일", value=date.today(), key="m_to")
+    with f3:
+        status_filter = st.selectbox("상태", ["전체", "진행중", "완료"], index=0)
+    with f4:
+        keyword = st.text_input("검색(장소/내용/발견자)", value="")
 
-    df = df_all.copy()
-    if f_status:
-        df = df[df["status"].isin(f_status)]
-    if f_loc.strip():
-        df = df[df["location"].fillna("").str.contains(f_loc.strip(), na=False)]
-    if f_reporter.strip():
-        df = df[df["reporter"].fillna("").str.contains(f_reporter.strip(), na=False)]
-    if kw.strip():
-        k = kw.strip()
-        df = df[
-            df["issue_text"].fillna("").str.contains(k, na=False) |
-            df["action_text"].fillna("").str.contains(k, na=False)
-        ]
+    tasks = fetch_tasks(d_from, d_to)
 
-    show_cols = [
-        "issue_date","location","issue_text","reporter","status",
-        "assignee","plan_due_date","action_text","action_date","id"
-    ]
-    st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+    # 필터
+    def match(t: dict) -> bool:
+        if status_filter != "전체" and t.get("status") != status_filter:
+            return False
+        if keyword.strip():
+            k = keyword.strip().lower()
+            blob = " ".join([
+                str(t.get("location") or ""),
+                str(t.get("issue_text") or ""),
+                str(t.get("reporter") or ""),
+                str(t.get("assignee") or ""),
+                str(t.get("action_text") or "")
+            ]).lower()
+            return k in blob
+        return True
 
-    st.divider()
-    st.subheader("삭제(주의)")
+    tasks = [t for t in tasks if match(t)]
 
-    if df.empty:
-        st.caption("삭제할 항목이 없습니다.")
+    st.caption(f"검색 결과: {len(tasks)}건")
+
+    if not tasks:
+        st.info("조건에 맞는 데이터가 없습니다.")
     else:
-        df["표시"] = df.apply(
-            lambda r: f"{r.get('issue_date')} / {r.get('location','')} / {str(r.get('issue_text',''))[:40]}",
-            axis=1
-        )
-        pick = st.selectbox("삭제할 항목 선택", df["표시"].tolist(), key="del_pick")
-        row = df[df["표시"] == pick].iloc[0].to_dict()
-        task_id = row["id"]
+        # 목록 테이블
+        df = pd.DataFrame([{
+            "일시": t.get("issue_date"),
+            "공정/장소": t.get("location"),
+            "발견자": t.get("reporter"),
+            "상태": t.get("status"),
+            "담당자": t.get("assignee"),
+            "계획일정": t.get("plan_due"),
+            "완료일": t.get("action_done_date"),
+            "요약": (t.get("issue_text") or "")[:40]
+        } for t in tasks])
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-        st.warning("삭제하면 해당 항목 + 연결된 사진이 모두 삭제됩니다.")
-        confirm = st.checkbox("정말 삭제할게요(체크 필요)")
-        if st.button("🗑 삭제 실행", disabled=not confirm):
-            try:
-                delete_task(task_id)
-                st.success("삭제 완료")
-                st.rerun()
-            except Exception as e:
-                st.error(f"삭제 실패: {e}")
+        st.divider()
+        st.markdown("### 건별 상세")
 
-# 끝
+        options = [f"{t.get('issue_date')} | {t.get('location')} | {(t.get('issue_text') or '')[:30]}... ({t.get('status')})" for t in tasks]
+        sel = st.selectbox("상세로 볼 항목", options, index=0, key="detail_select")
+        t = tasks[options.index(sel)]
+
+        st.markdown(f"**개선 필요사항:** {t.get('issue_text')}")
+        st.write(f"- 발견자: {t.get('reporter')}")
+        st.write(f"- 담당자: {t.get('assignee') or '-'} / 계획일정: {t.get('plan_due') or '-'}")
+        st.write(f"- 개선내용: {t.get('action_text') or '-'} / 완료일: {t.get('action_done_date') or '-'}")
+        st.write(f"- 상태: **{t.get('status')}**")
+
+        # 상태 강제 변경(원하면)
+        cst1, cst2 = st.columns([1, 3])
+        with cst1:
+            new_status = st.selectbox("상태 변경", ["진행중", "완료"], index=0 if t.get("status") != "완료" else 1)
+            if st.button("상태 저장"):
+                try:
+                    update_task(t["id"], {"status": new_status})
+                    st.success("상태 저장 완료")
+                except Exception as e:
+                    st.error("상태 저장 실패")
+                    st.exception(e)
+
+        # 사진 표시/삭제
+        photos = t.get("photos") or []
+        try:
+            if isinstance(photos, str):
+                photos = json.loads(photos)
+        except Exception:
+            photos = []
+
+        st.markdown("#### 사진")
+        if not photos:
+            st.info("등록된 사진이 없습니다.")
+        else:
+            cols = st.columns(3)
+            for i, p in enumerate(photos):
+                with cols[i % 3]:
+                    st.image(p.get("public_url"), use_container_width=True)
+                    if st.button("🗑 삭제", key=f"del_{p.get('photo_id')}"):
+                        try:
+                            delete_photo(p.get("photo_id"), p.get("storage_path"))
+                            st.success("삭제 완료 (새로고침하면 반영)")
+                            st.rerun()
+                        except Exception as e:
+                            st.error("삭제 실패")
+                            st.exception(e)
+
+        st.markdown("#### 사진 추가 업로드 (교체는: 삭제 후 다시 업로드)")
+        add_files = st.file_uploader("추가할 사진", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True, key="add_files")
+        if st.button("📤 사진 추가 업로드"):
+            if not add_files:
+                st.warning("추가할 사진을 선택해 주세요.")
+            else:
+                try:
+                    for f in add_files:
+                        upload_photo(t["id"], f)
+                    st.success("업로드 완료")
+                    st.rerun()
+                except Exception as e:
+                    st.error("업로드 실패")
+                    st.exception(e)
