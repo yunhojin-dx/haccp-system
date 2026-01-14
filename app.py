@@ -19,7 +19,6 @@ from supabase import create_client
 # =========================================================
 st.set_page_config(page_title="천안공장 HACCP 개선관리", layout="wide")
 
-# CSS로 여백 줄이기 (한 화면에 많이 보여주기 위함)
 st.markdown("""
 <style>
     .block-container {padding-top: 1rem; padding-bottom: 1rem;}
@@ -95,9 +94,7 @@ def delete_task_entirely(task_id: str, photos: list):
             except: pass 
     sb.table("haccp_tasks").delete().eq("id", task_id).execute()
 
-# [중요] 사진 정보 포함하여 과제 목록 가져오기 (DB 조회 최적화)
 def fetch_tasks_all() -> list[dict]:
-    # 1. 모든 과제 가져오기 (필터링은 Pandas에서 처리하여 다중 선택 지원)
     try:
         res = sb.table("haccp_tasks").select("*").order("issue_date", desc=True).execute()
         tasks = res.data or []
@@ -107,7 +104,6 @@ def fetch_tasks_all() -> list[dict]:
 
     if not tasks: return []
 
-    # 2. 모든 사진 가져오기
     t_ids = [t["id"] for t in tasks]
     if not t_ids: return tasks
 
@@ -115,7 +111,6 @@ def fetch_tasks_all() -> list[dict]:
         res_p = sb.table("haccp_task_photos").select("*").in_("task_id", t_ids).execute()
         photos = res_p.data or []
         
-        # 사진 매핑
         photo_map = {}
         for p in photos:
             tid = p["task_id"]
@@ -126,7 +121,7 @@ def fetch_tasks_all() -> list[dict]:
         for t in tasks:
             t["photos"] = photo_map.get(t["id"], [])
             
-    except: pass # 사진 가져오기 실패해도 목록은 보여줌
+    except: pass 
 
     return tasks
 
@@ -138,7 +133,6 @@ def insert_task(issue_date, location, issue_text, reporter):
 def update_task(task_id, patch):
     sb.table("haccp_tasks").update(patch).eq("id", task_id).execute()
 
-# 엑셀 다운로드 (디자인 적용)
 def download_image_to_temp(url: str) -> str | None:
     try:
         r = requests.get(url, timeout=10)
@@ -232,56 +226,73 @@ def display_task_photos(t):
 tabs = st.tabs(["📊 대시보드", "📝 문제등록", "📅 계획수립", "🛠️ 조치입력", "🔍 조회/관리"])
 
 # ---------------------------------------------------------
-# (A) 대시보드/보고서 (개편됨: 다중선택 + 표)
+# (A) 대시보드/보고서
 # ---------------------------------------------------------
 with tabs[0]:
-    # 1. 데이터 가져오기 (전체 로드 후 필터링)
+    # 1. 데이터 가져오기
     raw_tasks = fetch_tasks_all()
     
     if not raw_tasks:
         st.info("등록된 데이터가 없습니다.")
     else:
-        # 데이터프레임 변환 (필터링 편의성)
         df_all = pd.DataFrame(raw_tasks)
         df_all['issue_date'] = pd.to_datetime(df_all['issue_date'])
+        
+        # 필터링을 위한 파생 컬럼 생성
         df_all['Year'] = df_all['issue_date'].dt.year
         df_all['YYYY-MM'] = df_all['issue_date'].dt.strftime('%Y-%m')
+        # [NEW] 주차 라벨 생성 (예: 2026-02주차)
+        df_all['Week_Label'] = df_all['issue_date'].apply(lambda x: f"{x.year}-{x.isocalendar()[1]:02d}주차")
 
-        # 2. 필터 UI (한 줄에 배치)
+        # 2. 필터 UI (주간 로직 변경됨)
         c1, c2 = st.columns([1, 4])
         with c1:
-            period_mode = st.selectbox("기간 기준", ["월간", "연간", "기간지정"], index=0)
+            period_mode = st.selectbox("기간 기준", ["월간", "주간", "연간", "기간지정"], index=0)
         
         filtered_df = df_all.copy()
+        today = date.today()
         
         with c2:
             if period_mode == "월간":
-                # 월 다중 선택 (기본값: 이번달)
                 all_months = sorted(df_all['YYYY-MM'].unique(), reverse=True)
                 this_month = datetime.now().strftime('%Y-%m')
                 default_m = [this_month] if this_month in all_months else (all_months[:1] if all_months else [])
                 
-                selected_months = st.multiselect("조회할 월을 선택하세요 (복수 선택 가능)", all_months, default=default_m)
+                selected_months = st.multiselect("조회할 월 선택 (복수 가능)", all_months, default=default_m)
                 if selected_months:
                     filtered_df = df_all[df_all['YYYY-MM'].isin(selected_months)]
                 else:
-                    filtered_df = df_all.iloc[0:0] # 선택 안하면 빈값
+                    filtered_df = df_all.iloc[0:0]
+
+            elif period_mode == "주간":
+                # [NEW] 주차 다중 선택 기능
+                all_weeks = sorted(df_all['Week_Label'].unique(), reverse=True)
+                # 이번주 계산
+                this_year, this_week, _ = datetime.now().isocalendar()
+                this_week_label = f"{this_year}-{this_week:02d}주차"
+                
+                default_w = [this_week_label] if this_week_label in all_weeks else (all_weeks[:1] if all_weeks else [])
+                
+                selected_weeks = st.multiselect("조회할 주차 선택 (복수 가능)", all_weeks, default=default_w)
+                
+                if selected_weeks:
+                    filtered_df = df_all[df_all['Week_Label'].isin(selected_weeks)]
+                else:
+                    filtered_df = df_all.iloc[0:0]
 
             elif period_mode == "연간":
-                # 년 다중 선택 (기본값: 올해)
                 all_years = sorted(df_all['Year'].unique(), reverse=True)
                 this_year = datetime.now().year
                 default_y = [this_year] if this_year in all_years else (all_years[:1] if all_years else [])
                 
-                selected_years = st.multiselect("조회할 연도를 선택하세요 (복수 선택 가능)", all_years, default=default_y)
+                selected_years = st.multiselect("조회할 연도 선택 (복수 가능)", all_years, default=default_y)
                 if selected_years:
                     filtered_df = df_all[df_all['Year'].isin(selected_years)]
                 else:
                     filtered_df = df_all.iloc[0:0]
 
-            else: # 기간지정 (주간 등)
+            else: # 기간지정
                 d_col1, d_col2 = st.columns(2)
-                today = date.today()
                 start_d = d_col1.date_input("시작일", value=today - timedelta(weeks=1))
                 end_d = d_col2.date_input("종료일", value=today)
                 filtered_df = df_all[
@@ -289,7 +300,7 @@ with tabs[0]:
                     (df_all['issue_date'].dt.date <= end_d)
                 ]
 
-        # 3. 핵심 지표 (Metrics)
+        # 3. 핵심 지표
         st.divider()
         total_cnt = len(filtered_df)
         done_cnt = len(filtered_df[filtered_df['status'] == '완료'])
@@ -300,25 +311,20 @@ with tabs[0]:
         m2.metric("조치 완료", f"{done_cnt}건")
         m3.metric("완료율", f"{rate:.1f}%")
         with m4:
-            if st.button("📥 엑셀 다운로드 (사진 포함)", type="primary", use_container_width=True):
-                # 필터링된 데이터만 엑셀로 변환
-                # DataFrame -> dict list 변환 필요
+            if st.button("📥 엑셀 다운로드", type="primary", use_container_width=True):
                 tasks_to_export = filtered_df.to_dict('records')
-                # photos 등 누락된 정보 다시 채워주기 (df변환시 object라 유지되지만 안전하게)
                 with st.spinner("엑셀 생성 중..."):
                     xbytes = export_excel(tasks_to_export)
-                    fname = f"HACCP_개선보고서_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                    fname = f"HACCP_보고서_{datetime.now().strftime('%Y%m%d')}.xlsx"
                     st.download_button("⬇️ 파일 받기", data=xbytes, file_name=fname, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # 4. 차트와 표 (반반 배치)
+        # 4. 차트와 표
         st.divider()
-        
         if total_cnt == 0:
             st.warning("선택된 기간에 데이터가 없습니다.")
         else:
             col_chart, col_table = st.columns([1, 1])
             
-            # (1) 데이터 집계 (장소별)
             filtered_df['공정/장소'] = filtered_df['location'].fillna("미분류").str.strip()
             
             loc_stats = filtered_df.groupby('공정/장소').agg(
@@ -329,35 +335,31 @@ with tabs[0]:
             loc_stats = loc_stats.sort_values('발생건수', ascending=False)
 
             with col_chart:
-                st.markdown("##### 📊 장소별 발생 현황 (그래프)")
-                # 차트용 데이터 변환
+                st.markdown("##### 📊 장소별 현황")
                 chart_data = loc_stats.melt('공정/장소', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
-                
                 chart = alt.Chart(chart_data).mark_bar().encode(
                     x=alt.X('공정/장소:N', sort='-y', axis=alt.Axis(labelAngle=0), title=None),
                     y=alt.Y('건수:Q', title=None),
                     color=alt.Color('구분:N', scale=alt.Scale(domain=['발생건수', '완료건수'], range=['#FF9F36', '#2ECC71'])),
                     xOffset='구분:N',
                     tooltip=['공정/장소', '구분', '건수']
-                ).properties(height=350)
+                ).properties(height=300)
                 st.altair_chart(chart, use_container_width=True)
 
             with col_table:
-                st.markdown("##### 📋 장소별 상세 집계 (표)")
-                # 보기 좋게 컬럼명 정리 및 표시
+                st.markdown("##### 📋 상세 집계")
                 display_table = loc_stats.rename(columns={'공정/장소': '장소'})
-                
                 st.dataframe(
                     display_table,
                     column_config={
-                        "장소": st.column_config.TextColumn("장소", width="medium"),
-                        "발생건수": st.column_config.NumberColumn("발생", format="%d건"),
-                        "완료건수": st.column_config.NumberColumn("완료", format="%d건"),
+                        "장소": st.column_config.TextColumn("장소"),
+                        "발생건수": st.column_config.NumberColumn("발생", format="%d"),
+                        "완료건수": st.column_config.NumberColumn("완료", format="%d"),
                         "개선율": st.column_config.ProgressColumn("진행률", format="%.1f%%", min_value=0, max_value=100),
                     },
                     use_container_width=True,
                     hide_index=True,
-                    height=350
+                    height=300
                 )
 
 
@@ -390,7 +392,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("📅 계획 수립")
     tasks = fetch_tasks_all()
-    tasks = [t for t in tasks if t['status'] != '완료'] # 미완료만 보기
+    tasks = [t for t in tasks if t['status'] != '완료'] 
     
     if not tasks:
         st.info("계획을 수립할 미완료 과제가 없습니다.")
@@ -418,7 +420,6 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("🛠️ 조치 결과 입력")
     tasks = fetch_tasks_all()
-    # 완료 안된 것만
     tasks = [t for t in tasks if t['status'] != '완료']
     
     if not tasks:
@@ -450,7 +451,6 @@ with tabs[3]:
 with tabs[4]:
     st.subheader("🔍 통합 조회 및 관리")
     
-    # 간편 필터
     c1, c2, c3 = st.columns([1, 1, 2])
     status_filter = c1.selectbox("상태", ["전체", "진행중", "완료"])
     loc_filter = c2.text_input("장소 검색")
@@ -467,7 +467,6 @@ with tabs[4]:
     if not filtered:
         st.warning("조건에 맞는 데이터가 없습니다.")
     else:
-        # 목록 표시
         df_list = pd.DataFrame(filtered)[['issue_date', 'location', 'issue_text', 'reporter', 'status', 'assignee', 'action_done_date']]
         df_list.columns = ['일시', '장소', '내용', '발견자', '상태', '담당자', '완료일']
         st.dataframe(df_list, use_container_width=True, hide_index=True, height=200)
@@ -491,7 +490,6 @@ with tabs[4]:
                 st.success("삭제됨")
                 st.rerun()
                 
-        # 사진 개별 삭제
         if target.get('photos'):
             with st.expander("사진 개별 관리"):
                 cols = st.columns(4)
@@ -502,7 +500,6 @@ with tabs[4]:
                             delete_photo(p['photo_id'], p['storage_path'])
                             st.rerun()
                             
-        # 사진 추가
         new_photos = st.file_uploader("사진 추가 등록", accept_multiple_files=True, key="add_new")
         if new_photos and st.button("추가 업로드"):
             for f in new_photos: upload_photo(target['id'], f)
