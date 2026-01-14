@@ -50,7 +50,6 @@ BUCKET = st.secrets["SUPABASE_BUCKET"].strip()
 # =========================================================
 @st.cache_resource
 def get_supabase():
-    # service role 키 사용
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 sb = get_supabase()
@@ -89,42 +88,43 @@ def compress_image(file_bytes: bytes, max_w=1280, quality=80) -> tuple[bytes, st
     return out.getvalue(), "jpg"
 
 def make_public_url(bucket: str, path: str) -> str:
-    # Supabase public bucket URL 생성
     return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
 
 def upload_photo(task_id: str, uploaded_file) -> dict:
     raw = uploaded_file.read()
     compressed, ext = compress_image(raw, max_w=1400, quality=82)
-
-    # 경로: task_id/날짜_uuid.jpg
     key = f"{task_id}/{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
 
-    # 업로드
     sb.storage.from_(BUCKET).upload(
         path=key,
         file=compressed,
         file_options={"content-type": "image/jpeg", "upsert": "false"},
     )
-
     url = make_public_url(BUCKET, key)
-
-    # DB 기록
-    row = {
-        "task_id": task_id,
-        "storage_path": key,
-        "public_url": url
-    }
+    row = {"task_id": task_id, "storage_path": key, "public_url": url}
     sb.table("haccp_task_photos").insert(row).execute()
     return row
 
 def delete_photo(photo_id: str, storage_path: str):
-    # storage 삭제
     try:
         sb.storage.from_(BUCKET).remove([storage_path])
     except Exception:
         pass
-    # DB 삭제
     sb.table("haccp_task_photos").delete().eq("id", photo_id).execute()
+
+# [추가됨] 과제 전체 삭제 함수 (사진 파일 + DB 데이터)
+def delete_task_entirely(task_id: str, photos: list):
+    # 1. 저장소(Storage)에서 사진 파일들 삭제
+    if photos:
+        paths = [p.get("storage_path") for p in photos if p.get("storage_path")]
+        if paths:
+            try:
+                sb.storage.from_(BUCKET).remove(paths)
+            except:
+                pass # 파일 없어도 진행
+    
+    # 2. DB에서 과제 삭제 (Cascade 설정이 되어 있다면 사진 데이터도 자동 삭제되겠지만, 명시적으로 과제만 지우면 됨)
+    sb.table("haccp_tasks").delete().eq("id", task_id).execute()
 
 
 # =========================================================
@@ -138,11 +138,6 @@ def fetch_tasks(date_from: date | None = None, date_to: date | None = None) -> l
         q = q.lte("issue_date", str(date_to))
     res = q.execute()
     return res.data or []
-
-def fetch_task(task_id: str) -> dict | None:
-    res = sb.table("v_haccp_tasks").select("*").eq("id", task_id).limit(1).execute()
-    data = res.data or []
-    return data[0] if data else None
 
 def insert_task(issue_date: date, location: str, issue_text: str, reporter: str) -> str:
     row = {
@@ -160,7 +155,7 @@ def update_task(task_id: str, patch: dict):
 
 
 # =========================================================
-# 6) 엑셀(사진 포함) 내보내기 기능
+# 6) 엑셀 내보내기
 # =========================================================
 def download_image_to_temp(url: str) -> str | None:
     try:
@@ -175,7 +170,6 @@ def download_image_to_temp(url: str) -> str | None:
         return None
 
 def export_excel(tasks: list[dict]) -> bytes:
-    # 데이터프레임 생성
     rows = []
     for t in tasks:
         rows.append({
@@ -195,73 +189,70 @@ def export_excel(tasks: list[dict]) -> bytes:
 
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-        # 1) 데이터 시트
         sheet_data = "데이터"
         df.to_excel(writer, sheet_name=sheet_data, index=False, startrow=1)
         wb = writer.book
         ws = writer.sheets[sheet_data]
 
-        # 헤더 스타일
         header_fmt = wb.add_format({"bold": True, "bg_color": "#EFEFEF", "border": 1, "align": "center", "valign": "vcenter"})
-        
         for col, name in enumerate(df.columns):
             ws.write(0, col, name, header_fmt)
 
-        # 열 폭 설정
-        ws.set_column(0, 0, 30)  # ID
-        ws.set_column(1, 1, 12)  # 일시
-        ws.set_column(2, 2, 15)  # 장소
-        ws.set_column(3, 3, 40)  # 필요사항
-        ws.set_column(4, 10, 15) # 나머지
+        ws.set_column(0, 0, 30); ws.set_column(1, 1, 12); ws.set_column(2, 2, 15); ws.set_column(3, 3, 40); ws.set_column(4, 10, 15)
 
-        # 사진 칼럼 추가
         img_cols = ["사진1", "사진2", "사진3"]
         base_col = len(df.columns)
         for i, c in enumerate(img_cols):
             ws.write(0, base_col + i, c, header_fmt)
             ws.set_column(base_col + i, base_col + i, 20)
 
-        # 행 높이 설정 (사진 공간)
         for r in range(1, len(df) + 1):
             ws.set_row(r, 100)
 
-        # 사진 삽입
         for idx, t in enumerate(tasks):
             photos = t.get("photos") or []
             try:
-                if isinstance(photos, str):
-                    photos = json.loads(photos)
-            except Exception:
-                photos = []
+                if isinstance(photos, str): photos = json.loads(photos)
+            except: photos = []
             photos = photos[:3]
 
             for j, p in enumerate(photos):
                 url = p.get("public_url")
                 if not url: continue
-                
                 img_path = download_image_to_temp(url)
                 if not img_path: continue
-                
-                row = idx + 1
-                col = base_col + j
                 try:
-                    ws.insert_image(row, col, img_path, {"x_scale": 0.2, "y_scale": 0.2, "object_position": 1})
-                except:
-                    pass
+                    ws.insert_image(idx + 1, base_col + j, img_path, {"x_scale": 0.2, "y_scale": 0.2, "object_position": 1})
+                except: pass
 
-        # 2) 요약 시트
         sheet_sum = "요약"
         ws2 = wb.add_worksheet(sheet_sum)
         total = len(tasks)
         done = sum(1 for t in tasks if t.get("status") == "완료")
         rate = (done / total * 100) if total else 0.0
-
         ws2.write(0, 0, "HACCP 개선 보고서", wb.add_format({"bold": True, "font_size": 16}))
         ws2.write(2, 0, "총 발굴건수"); ws2.write(2, 1, total)
         ws2.write(3, 0, "개선완료 건수"); ws2.write(3, 1, done)
         ws2.write(4, 0, "완료율(%)"); ws2.write(4, 1, round(rate, 1))
 
     return out.getvalue()
+
+# [도우미 함수] 사진 목록 표시
+def display_task_photos(t):
+    photos = t.get("photos") or []
+    if isinstance(photos, str):
+        try: photos = json.loads(photos)
+        except: photos = []
+    
+    if photos:
+        st.markdown("📸 **현장 사진**")
+        cols = st.columns(4) # 한 줄에 4개씩
+        for i, p in enumerate(photos):
+            with cols[i % 4]:
+                st.image(p.get("public_url"), use_container_width=True)
+    else:
+        st.caption("등록된 사진이 없습니다.")
+    return photos
 
 
 # =========================================================
@@ -276,7 +267,7 @@ tabs = st.tabs([
 ])
 
 # ---------------------------------------------------------
-# (A) 대시보드/보고서 (수정됨: 그래프 레이블 가로 방향)
+# (A) 대시보드/보고서
 # ---------------------------------------------------------
 with tabs[0]:
     st.subheader("대시보드/보고서")
@@ -314,13 +305,11 @@ with tabs[0]:
     if total == 0:
         st.info("선택한 기간에 데이터가 없습니다.")
     else:
-        # 데이터프레임 생성
         df_loc = pd.DataFrame([{
             "공정/장소": (t.get("location") or "미분류").strip(),
             "상태": t.get("status")
         } for t in tasks])
 
-        # 1. 장소별 차트 (레이블 가로 방향 적용)
         st.markdown("#### 공정/장소별 발굴 vs 완료")
         if not df_loc.empty:
             loc_pivot = (
@@ -330,7 +319,6 @@ with tabs[0]:
             loc_long = loc_pivot.melt("공정/장소", var_name="구분", value_name="건수")
 
             chart1 = alt.Chart(loc_long).mark_bar().encode(
-                # 👇 여기 labelAngle=0 추가됨 (가로로 보이게)
                 x=alt.X("공정/장소:N", sort="-y", title="장소", axis=alt.Axis(labelAngle=0)),
                 y=alt.Y("건수:Q", title="건수"),
                 color=alt.Color("구분:N", scale=alt.Scale(domain=['발굴', '완료'], range=['#FF9F36', '#2ECC71'])),
@@ -339,7 +327,6 @@ with tabs[0]:
             ).properties(height=360)
             st.altair_chart(chart1, use_container_width=True)
 
-        # 2. 날짜별 차트
         st.markdown("#### 일자별 추이")
         df_day = pd.DataFrame([{
             "일자": t.get("issue_date"),
@@ -350,7 +337,6 @@ with tabs[0]:
         if not df_day.empty:
             df_day["일자"] = pd.to_datetime(df_day["일자"])
             day_pivot = df_day.groupby("일자", as_index=False)[["발굴", "완료"]].sum().sort_values("일자")
-            
             day_long = day_pivot.melt("일자", var_name="구분", value_name="건수")
 
             chart2 = alt.Chart(day_long).mark_line(point=True).encode(
@@ -362,7 +348,7 @@ with tabs[0]:
             st.altair_chart(chart2, use_container_width=True)
 
     st.divider()
-    st.markdown("#### 엑셀 보고서 다운로드 (사진 포함)")
+    st.markdown("#### 엑셀 보고서 다운로드")
     if st.button("📥 엑셀로 다운로드 (사진 포함)", type="primary"):
         with st.spinner("사진을 엑셀에 심는 중입니다..."):
             xbytes = export_excel(tasks)
@@ -404,7 +390,7 @@ with tabs[1]:
 
 
 # ---------------------------------------------------------
-# (C) 개선계획수립
+# (C) 개선계획수립 (사진 표시 추가)
 # ---------------------------------------------------------
 with tabs[2]:
     st.subheader("개선계획수립")
@@ -416,7 +402,13 @@ with tabs[2]:
         sel = st.selectbox("대상 선택", options, index=0)
         t = tasks[options.index(sel)]
         
-        st.info(f"선택: {t.get('issue_text')}")
+        st.divider()
+        st.markdown(f"**📍 장소:** {t.get('location')}  /  **📝 내용:** {t.get('issue_text')}")
+        
+        # [추가됨] 사진 보기
+        display_task_photos(t)
+        st.divider()
+
         with st.form("form_plan"):
             assignee = st.text_input("담당자", value=t.get("assignee") or "")
             plan_due = st.date_input("계획일정", value=pd.to_datetime(t.get("plan_due")).date() if t.get("plan_due") else date.today())
@@ -431,7 +423,7 @@ with tabs[2]:
 
 
 # ---------------------------------------------------------
-# (D) 개선완료 입력
+# (D) 개선완료 입력 (사진 표시 추가)
 # ---------------------------------------------------------
 with tabs[3]:
     st.subheader("개선완료 입력")
@@ -443,7 +435,13 @@ with tabs[3]:
         sel = st.selectbox("대상 선택", options, index=0, key="done_sel")
         t = tasks[options.index(sel)]
 
-        st.info(f"선택: {t.get('issue_text')}")
+        st.divider()
+        st.markdown(f"**📍 장소:** {t.get('location')}  /  **📝 내용:** {t.get('issue_text')}")
+        
+        # [추가됨] 사진 보기
+        display_task_photos(t)
+        st.divider()
+
         with st.form("form_done"):
             action_text = st.text_area("조치내용", value=t.get("action_text") or "")
             action_done_date = st.date_input("완료일", value=pd.to_datetime(t.get("action_done_date")).date() if t.get("action_done_date") else date.today())
@@ -457,7 +455,7 @@ with tabs[3]:
 
 
 # ---------------------------------------------------------
-# (E) 조회/관리
+# (E) 조회/관리 (사진 표시 보강 + 전체 삭제 추가)
 # ---------------------------------------------------------
 with tabs[4]:
     st.subheader("조회/관리")
@@ -490,25 +488,47 @@ with tabs[4]:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         st.divider()
-        st.markdown("#### 상세 관리 (사진 삭제/추가)")
+        st.markdown("#### 상세 관리 / 삭제")
         opts = [f"{t.get('issue_date')} | {t.get('location')} | {t.get('issue_text')}" for t in filtered]
         s = st.selectbox("과제 선택", opts)
         target = filtered[opts.index(s)]
         
-        # 사진 관리
-        photos = target.get("photos") or []
-        if isinstance(photos, str): photos = json.loads(photos)
+        c_info, c_del = st.columns([3, 1])
+        with c_info:
+             st.markdown(f"**내용:** {target.get('issue_text')}")
+             st.markdown(f"**담당:** {target.get('assignee') or '-'} | **완료일:** {target.get('action_done_date') or '-'}")
         
-        if photos:
-            cols = st.columns(3)
-            for i, p in enumerate(photos):
-                with cols[i%3]:
-                    st.image(p.get("public_url"), use_container_width=True)
-                    if st.button("🗑 삭제", key=f"d_{p.get('photo_id')}"):
-                        delete_photo(p.get("photo_id"), p.get("storage_path"))
-                        st.rerun()
+        with c_del:
+            st.write("") # 간격 맞춤
+            # [추가됨] 전체 삭제 버튼
+            if st.button("🚨 과제 전체 삭제 (복구 불가)", type="primary"):
+                # 사진 목록 확보
+                p_list = target.get("photos") or []
+                if isinstance(p_list, str): 
+                    try: p_list = json.loads(p_list)
+                    except: p_list = []
+                
+                # 삭제 함수 실행
+                delete_task_entirely(target["id"], p_list)
+                st.success("삭제되었습니다. (새로고침 중...)")
+                st.rerun()
+
+        # 사진 관리 섹션
+        current_photos = display_task_photos(target)
         
-        add_f = st.file_uploader("사진 추가", accept_multiple_files=True, key="add_p")
+        if current_photos:
+            with st.expander("🗑 개별 사진만 삭제하려면 클릭하세요"):
+                cols = st.columns(3)
+                for i, p in enumerate(current_photos):
+                    with cols[i%3]:
+                        st.image(p.get("public_url"), width=100)
+                        if st.button("삭제", key=f"d_{p.get('photo_id')}"):
+                            delete_photo(p.get("photo_id"), p.get("storage_path"))
+                            st.rerun()
+        
+        st.divider()
+        st.write("📸 **사진 추가 등록**")
+        add_f = st.file_uploader("", accept_multiple_files=True, key="add_p")
         if st.button("업로드 추가"):
             for f in add_f:
                 upload_photo(target["id"], f)
