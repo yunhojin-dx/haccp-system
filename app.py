@@ -17,33 +17,32 @@ from supabase import create_client
 # =========================================================
 # 0) 기본 UI 설정 (와이드 모드)
 # =========================================================
-# [수정] 페이지 타이틀 변경
 st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide")
 
-# [수정] CSS로 제목 크기 줄이고 상단 여백 확보
 st.markdown("""
 <style>
-    /* 상단 여백을 늘려서 제목이 잘리지 않게 함 */
-    .block-container {padding-top: 2rem; padding-bottom: 1rem;}
+    /* [수정] 상단 여백을 2rem -> 4rem으로 더 늘려서 제목 잘림 방지 */
+    .block-container {padding-top: 4rem; padding-bottom: 1rem;}
     
-    /* 제목(h1) 글자 크기 줄이기 (기존보다 작게) */
+    /* 제목 스타일 */
     h1 { font-size: 2.5rem !important; font-weight: 700 !important; }
     
     .small-muted {color:#666; font-size:12px;}
 </style>
 """, unsafe_allow_html=True)
 
-# [수정] 이미지와 제목을 나란히 배치하기 위한 컬럼 사용
+# [수정] 이미지와 제목 배치
 col_img, col_txt = st.columns([0.8, 6])
 
 with col_img:
-    # 지평생막걸리 이미지 (웹 이미지 URL 사용)
-    # 만약 이미지가 안 나오면, 이 URL이 변경되었을 수 있습니다.
-    # 실제 운영시에는 Supabase 버킷에 이미지를 올리고 그 주소를 쓰는 것이 안전합니다.
-    st.image("https://cdn.imweb.me/thumbnail/20220415/b666670024389.png", width=110)
+    # 1. 같은 폴더에 'logo.png'가 있으면 그걸 사용 (가장 추천)
+    if os.path.exists("logo.png"):
+        st.image("logo.png", width=110)
+    # 2. 없으면 막걸리 아이콘으로 대체 (에러 방지)
+    else:
+        st.markdown("<div style='font-size:4rem; line-height:1;'>🍶</div>", unsafe_allow_html=True)
 
 with col_txt:
-    # [수정] 메인 제목 변경 (팩토리 이모지 제거하고 깔끔하게)
     st.title("천안공장 위생 개선관리")
     st.caption("스마트 해썹(HACCP) 대응을 위한 현장 개선 데이터 관리 시스템")
 
