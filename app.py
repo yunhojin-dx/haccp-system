@@ -17,58 +17,126 @@ from supabase import create_client
 # =========================================================
 # 0) 기본 UI 설정 (와이드 모드)
 # =========================================================
-st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide")
+st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide", initial_sidebar_state="collapsed")
 
+# [디자인 개선 CSS 적용]
 st.markdown("""
 <style>
-    /* 상단 여백 조정 */
-    .block-container {padding-top: 3rem; padding-bottom: 1rem;}
+    /* 전체 컨테이너 여백 및 폰트 설정 */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; /* 깔끔한 폰트 적용 */
+    }
     
-    /* 헤더 영역 스타일 (수직 중앙 정렬을 위한 flexbox) */
+    /* --- 헤더 영역 디자인 --- */
     .header-container {
         display: flex;
         align-items: center; /* 수직 중앙 정렬 */
+        padding: 1rem 0;
+        margin-bottom: 2rem;
+        border-bottom: 1px solid #eee; /* 하단 구분선 */
     }
     
+    /* 이미지 영역 */
+    .header-image-container {
+        flex: 0 0 auto; /* 크기 고정 */
+        margin-right: 2rem; /* 이미지와 제목 사이 간격 넓힘 */
+    }
+    
+    .header-image-container img {
+        width: 100%;
+        max-width: 150px; /* 이미지 최대 너비 제한 */
+        height: auto;
+        border-radius: 8px; /* 부드러운 모서리 */
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1); /* 부드러운 그림자 */
+    }
+
+    /* 대체 아이콘 스타일 */
+    .fallback-icon {
+        font-size: 4rem;
+        text-align: center;
+        display: block;
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 8px;
+    }
+    
+    /* 텍스트 영역 */
+    .header-text-container {
+        flex: 1 1 auto; /* 남은 공간 채움 */
+    }
+
     /* 제목 스타일 */
     h1.main-title { 
-        font-size: 3rem !important; 
-        font-weight: 700 !important; 
-        margin-bottom: 0.5rem !important;
+        font-size: 2.8rem !important; 
+        font-weight: 800 !important; 
+        margin-bottom: 0.3rem !important;
         line-height: 1.2 !important;
+        color: #333; /* 진한 회색 */
     }
     
     /* 부제목 스타일 */
     .sub-caption {
         font-size: 1.1rem;
         color: #666;
+        margin-top: 0;
     }
-    
-    /* 대체 아이콘 스타일 */
-    .fallback-icon {
-        font-size: 5rem;
-        text-align: center;
-        display: block;
+
+    /* --- 탭(책갈피) 스타일 디자인 --- */
+    /* 탭 컨테이너 */
+    div[data-testid="stTabs"] {
+        background-color: transparent;
+        border-bottom: 2px solid #e9ecef; /* 탭 하단 굵은 선 */
     }
-    
+
+    /* 개별 탭 버튼 스타일 */
+    div[data-testid="stTabs"] button[data-testid="stTab"] {
+        background-color: #f8f9fa; /* 기본 배경색 */
+        color: #495057; /* 기본 글자색 */
+        border: 1px solid #e9ecef; /* 테두리 */
+        border-bottom: none; /* 아래쪽 테두리 제거 */
+        border-radius: 8px 8px 0 0; /* 위쪽 모서리 둥글게 */
+        padding: 0.8rem 1.5rem; /* 내부 여백 */
+        margin-right: 0.2rem; /* 탭 사이 간격 */
+        font-weight: 600;
+        transition: all 0.2s ease-in-out; /* 부드러운 전환 효과 */
+    }
+
+    /* 선택된 탭 스타일 */
+    div[data-testid="stTabs"] button[data-testid="stTab"][aria-selected="true"] {
+        background-color: #ffffff; /* 선택 배경색 (흰색) */
+        color: #FF4B4B; /* 선택 글자색 (강조색 - 예: Streamlit 빨강) */
+        border-color: #e9ecef; /* 테두리 색상 유지 */
+        border-bottom: 2px solid #ffffff; /* 아래쪽 테두리를 배경색과 맞춰 덮음 */
+        margin-bottom: -2px; /* 아래 선 위로 덮어쓰기 */
+        box-shadow: 0 -2px 5px rgba(0,0,0,0.05); /* 살짝 떠있는 느낌 */
+    }
+
+    /* 탭 호버 효과 */
+    div[data-testid="stTabs"] button[data-testid="stTab"]:hover {
+        color: #FF4B4B;
+        background-color: #fff;
+        border-color: #ced4da;
+    }
+
     .small-muted {color:#666; font-size:12px;}
+
 </style>
 """, unsafe_allow_html=True)
 
-# [수정] 이미지와 제목 배치 비율 변경 (이미지 영역 확대)
-col_img, col_txt = st.columns([1.2, 4.8])
-
-with col_img:
-    # [수정] 이미지를 컬럼 너비에 맞춰 꽉 차게 표시 (use_container_width=True)
-    if os.path.exists("logo.png"):
-        st.image("logo.png", use_container_width=True)
-    else:
-        st.markdown("<div class='fallback-icon'>🍶</div>", unsafe_allow_html=True)
-
-with col_txt:
-    # [수정] 제목에 클래스 적용하여 스타일 세부 조정
-    st.markdown('<h1 class="main-title">천안공장 위생 개선관리</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-caption">스마트 해썹(HACCP) 대응을 위한 현장 개선 데이터 관리 시스템</p>', unsafe_allow_html=True)
+# [수정] 헤더 영역 HTML/CSS로 직접 구성 (간격 및 디자인 정밀 제어)
+st.markdown(f"""
+<div class="header-container">
+    <div class="header-image-container">
+        {"<img src='logo.png' alt='로고'>" if os.path.exists("logo.png") else "<div class='fallback-icon'>🍶</div>"}
+    </div>
+    <div class="header-text-container">
+        <h1 class="main-title">천안공장 위생 개선관리</h1>
+        <p class="sub-caption">스마트 해썹(HACCP) 대응을 위한 현장 개선 데이터 관리 시스템</p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 
 # =========================================================
@@ -268,7 +336,7 @@ def display_task_photos(t):
 tabs = st.tabs(["📊 대시보드", "📝 문제등록", "📅 계획수립", "🛠️ 조치입력", "🔍 조회/관리"])
 
 # ---------------------------------------------------------
-# (A) 대시보드/보고서 (수정됨: 장소별 그래프 + 표)
+# (A) 대시보드/보고서
 # ---------------------------------------------------------
 with tabs[0]:
     raw_tasks = fetch_tasks_all()
