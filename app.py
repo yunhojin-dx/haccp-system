@@ -21,30 +21,54 @@ st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide")
 
 st.markdown("""
 <style>
-    /* [수정] 상단 여백을 2rem -> 4rem으로 더 늘려서 제목 잘림 방지 */
-    .block-container {padding-top: 4rem; padding-bottom: 1rem;}
+    /* 상단 여백 조정 */
+    .block-container {padding-top: 3rem; padding-bottom: 1rem;}
+    
+    /* 헤더 영역 스타일 (수직 중앙 정렬을 위한 flexbox) */
+    .header-container {
+        display: flex;
+        align-items: center; /* 수직 중앙 정렬 */
+    }
     
     /* 제목 스타일 */
-    h1 { font-size: 2.5rem !important; font-weight: 700 !important; }
+    h1.main-title { 
+        font-size: 3rem !important; 
+        font-weight: 700 !important; 
+        margin-bottom: 0.5rem !important;
+        line-height: 1.2 !important;
+    }
+    
+    /* 부제목 스타일 */
+    .sub-caption {
+        font-size: 1.1rem;
+        color: #666;
+    }
+    
+    /* 대체 아이콘 스타일 */
+    .fallback-icon {
+        font-size: 5rem;
+        text-align: center;
+        display: block;
+    }
     
     .small-muted {color:#666; font-size:12px;}
 </style>
 """, unsafe_allow_html=True)
 
-# [수정] 이미지와 제목 배치
-col_img, col_txt = st.columns([0.8, 6])
+# [수정] 이미지와 제목 배치 비율 변경 (이미지 영역 확대)
+col_img, col_txt = st.columns([1.2, 4.8])
 
 with col_img:
-    # 1. 같은 폴더에 'logo.png'가 있으면 그걸 사용 (가장 추천)
+    # [수정] 이미지를 컬럼 너비에 맞춰 꽉 차게 표시 (use_container_width=True)
     if os.path.exists("logo.png"):
-        st.image("logo.png", width=110)
-    # 2. 없으면 막걸리 아이콘으로 대체 (에러 방지)
+        st.image("logo.png", use_container_width=True)
     else:
-        st.markdown("<div style='font-size:4rem; line-height:1;'>🍶</div>", unsafe_allow_html=True)
+        st.markdown("<div class='fallback-icon'>🍶</div>", unsafe_allow_html=True)
 
 with col_txt:
-    st.title("천안공장 위생 개선관리")
-    st.caption("스마트 해썹(HACCP) 대응을 위한 현장 개선 데이터 관리 시스템")
+    # [수정] 제목에 클래스 적용하여 스타일 세부 조정
+    st.markdown('<h1 class="main-title">천안공장 위생 개선관리</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-caption">스마트 해썹(HACCP) 대응을 위한 현장 개선 데이터 관리 시스템</p>', unsafe_allow_html=True)
 
 
 # =========================================================
