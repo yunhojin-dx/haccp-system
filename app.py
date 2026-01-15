@@ -3,6 +3,7 @@ import io
 import json
 import uuid
 import math
+import base64
 import tempfile
 from datetime import date, datetime, timedelta
 
@@ -19,117 +20,127 @@ from supabase import create_client
 # =========================================================
 st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide", initial_sidebar_state="collapsed")
 
-# [디자인 개선 CSS 적용]
+# [이미지 처리를 위한 함수 추가]
+def get_image_base64(file_path):
+    """로컬 이미지를 HTML에서 쓸 수 있게 Base64로 변환"""
+    with open(file_path, "rb") as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
+
+# [디자인 CSS]
 st.markdown("""
 <style>
-    /* 전체 컨테이너 여백 및 폰트 설정 */
+    /* 폰트 및 기본 여백 */
     .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; /* 깔끔한 폰트 적용 */
+        padding-top: 3rem;
+        padding-bottom: 3rem;
+        font-family: 'Pretendard', 'Malgun Gothic', sans-serif;
     }
     
     /* --- 헤더 영역 디자인 --- */
     .header-container {
         display: flex;
         align-items: center; /* 수직 중앙 정렬 */
-        padding: 1rem 0;
-        margin-bottom: 2rem;
-        border-bottom: 1px solid #eee; /* 하단 구분선 */
+        padding-bottom: 2rem;
+        margin-bottom: 1rem;
+        border-bottom: 2px solid #f1f3f5; /* 하단 구분선 */
     }
     
     /* 이미지 영역 */
     .header-image-container {
-        flex: 0 0 auto; /* 크기 고정 */
-        margin-right: 2rem; /* 이미지와 제목 사이 간격 넓힘 */
+        flex: 0 0 auto;
+        margin-right: 2.5rem; /* 이미지-제목 사이 간격 (넓게) */
     }
     
     .header-image-container img {
-        width: 100%;
-        max-width: 150px; /* 이미지 최대 너비 제한 */
+        width: 140px; /* 로고 크기 */
         height: auto;
-        border-radius: 8px; /* 부드러운 모서리 */
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1); /* 부드러운 그림자 */
+        border-radius: 12px; /* 둥근 모서리 */
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08); /* 부드러운 그림자 */
     }
 
-    /* 대체 아이콘 스타일 */
+    /* 대체 아이콘 */
     .fallback-icon {
-        font-size: 4rem;
-        text-align: center;
-        display: block;
-        background-color: #f8f9fa;
-        padding: 1rem;
-        border-radius: 8px;
+        font-size: 5rem;
+        line-height: 1;
+        background: #f8f9fa;
+        padding: 10px;
+        border-radius: 12px;
     }
     
     /* 텍스트 영역 */
     .header-text-container {
-        flex: 1 1 auto; /* 남은 공간 채움 */
+        flex: 1;
     }
 
-    /* 제목 스타일 */
+    /* 메인 제목 */
     h1.main-title { 
-        font-size: 2.8rem !important; 
+        font-size: 3.2rem !important; 
         font-weight: 800 !important; 
-        margin-bottom: 0.3rem !important;
-        line-height: 1.2 !important;
-        color: #333; /* 진한 회색 */
+        margin: 0 !important;
+        color: #212529;
+        letter-spacing: -1px;
     }
     
-    /* 부제목 스타일 */
+    /* 부제목 */
     .sub-caption {
-        font-size: 1.1rem;
-        color: #666;
-        margin-top: 0;
+        font-size: 1.2rem;
+        color: #868e96;
+        margin-top: 0.5rem;
+        font-weight: 500;
     }
 
-    /* --- 탭(책갈피) 스타일 디자인 --- */
-    /* 탭 컨테이너 */
+    /* --- 탭(책갈피) 스타일 --- */
     div[data-testid="stTabs"] {
-        background-color: transparent;
-        border-bottom: 2px solid #e9ecef; /* 탭 하단 굵은 선 */
+        gap: 0px;
     }
 
-    /* 개별 탭 버튼 스타일 */
+    /* 탭 버튼 기본 */
     div[data-testid="stTabs"] button[data-testid="stTab"] {
-        background-color: #f8f9fa; /* 기본 배경색 */
-        color: #495057; /* 기본 글자색 */
-        border: 1px solid #e9ecef; /* 테두리 */
-        border-bottom: none; /* 아래쪽 테두리 제거 */
-        border-radius: 8px 8px 0 0; /* 위쪽 모서리 둥글게 */
-        padding: 0.8rem 1.5rem; /* 내부 여백 */
-        margin-right: 0.2rem; /* 탭 사이 간격 */
-        font-weight: 600;
-        transition: all 0.2s ease-in-out; /* 부드러운 전환 효과 */
+        background-color: #f8f9fa;
+        color: #495057;
+        border: 1px solid #dee2e6;
+        border-bottom: none;
+        border-radius: 10px 10px 0 0;
+        padding: 1rem 2rem;
+        font-size: 1rem;
+        font-weight: 700;
+        transition: all 0.2s;
+        margin-right: 4px;
     }
 
-    /* 선택된 탭 스타일 */
+    /* 탭 선택됨 */
     div[data-testid="stTabs"] button[data-testid="stTab"][aria-selected="true"] {
-        background-color: #ffffff; /* 선택 배경색 (흰색) */
-        color: #FF4B4B; /* 선택 글자색 (강조색 - 예: Streamlit 빨강) */
-        border-color: #e9ecef; /* 테두리 색상 유지 */
-        border-bottom: 2px solid #ffffff; /* 아래쪽 테두리를 배경색과 맞춰 덮음 */
-        margin-bottom: -2px; /* 아래 선 위로 덮어쓰기 */
-        box-shadow: 0 -2px 5px rgba(0,0,0,0.05); /* 살짝 떠있는 느낌 */
+        background-color: #ffffff;
+        color: #e03131; /* 강조색 (빨강) */
+        border-top: 3px solid #e03131;
+        border-bottom: 2px solid #ffffff; /* 하단 선 덮기 */
+        margin-bottom: -2px;
+        z-index: 10;
     }
-
-    /* 탭 호버 효과 */
-    div[data-testid="stTabs"] button[data-testid="stTab"]:hover {
-        color: #FF4B4B;
-        background-color: #fff;
-        border-color: #ced4da;
+    
+    /* 탭 내용 영역 상단 테두리 */
+    div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] {
+        border-top: 2px solid #dee2e6; 
+        margin-top: -2px;
     }
-
-    .small-muted {color:#666; font-size:12px;}
 
 </style>
 """, unsafe_allow_html=True)
 
-# [수정] 헤더 영역 HTML/CSS로 직접 구성 (간격 및 디자인 정밀 제어)
+# [헤더 출력 로직]
+# 로고 파일이 있으면 Base64로 변환해서 넣고, 없으면 아이콘 표시
+logo_html = ""
+if os.path.exists("logo.png"):
+    img_b64 = get_image_base64("logo.png")
+    logo_html = f'<img src="data:image/png;base64,{img_b64}" alt="로고">'
+else:
+    logo_html = "<div class='fallback-icon'>🍶</div>"
+
 st.markdown(f"""
 <div class="header-container">
     <div class="header-image-container">
-        {"<img src='logo.png' alt='로고'>" if os.path.exists("logo.png") else "<div class='fallback-icon'>🍶</div>"}
+        {logo_html}
     </div>
     <div class="header-text-container">
         <h1 class="main-title">천안공장 위생 개선관리</h1>
