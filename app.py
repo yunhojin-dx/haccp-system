@@ -20,7 +20,7 @@ from supabase import create_client
 # =========================================================
 st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide", initial_sidebar_state="collapsed")
 
-# [이미지 처리를 위한 함수 추가]
+# [이미지 처리를 위한 함수]
 def get_image_base64(file_path):
     """로컬 이미지를 HTML에서 쓸 수 있게 Base64로 변환"""
     with open(file_path, "rb") as f:
@@ -129,7 +129,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # [헤더 출력 로직]
-# 로고 파일이 있으면 Base64로 변환해서 넣고, 없으면 아이콘 표시
 logo_html = ""
 if os.path.exists("logo.png"):
     img_b64 = get_image_base64("logo.png")
@@ -447,7 +446,7 @@ with tabs[0]:
             loc_stats = loc_stats.sort_values('발생건수', ascending=False)
 
             with col_chart:
-                # [그래프] 장소별 막대 그래프 (기존 형태 복구)
+                # [그래프] 장소별 막대 그래프
                 st.markdown("##### 📊 장소별 발생/완료 현황")
                 c_data = loc_stats.melt('공정/장소', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
                 
@@ -530,35 +529,81 @@ with tabs[2]:
                 st.rerun()
 
 # ---------------------------------------------------------
-# (D) 개선완료 입력
+# (D) 조치 결과 입력 (기능 강화됨)
 # ---------------------------------------------------------
 with tabs[3]:
     st.subheader("🛠️ 조치 결과 입력")
-    tasks = fetch_tasks_all()
-    tasks = [t for t in tasks if t['status'] != '완료']
     
-    if not tasks:
-        st.info("조치할 과제가 없습니다.")
+    # 1. 모든 과제 로드 (완료된 건은 제외)
+    all_tasks = fetch_tasks_all()
+    target_tasks = [t for t in all_tasks if t['status'] != '완료']
+
+    if not target_tasks:
+        st.info("조치할 미완료 과제가 없습니다.")
     else:
-        opts = [f"[{t['issue_date']}] {t['location']} - {t['issue_text'][:20]}..." for t in tasks]
-        sel = st.selectbox("과제 선택", opts, key="act_sel")
-        t = tasks[opts.index(sel)]
+        # --- [신규 기능] 담당자/장소 필터 추가 ---
+        assignees = sorted(list(set([t.get('assignee') or "미지정" for t in target_tasks])))
+        locations = sorted(list(set([t.get('location') or "미분류" for t in target_tasks])))
         
-        st.info(f"내용: {t['issue_text']}")
-        display_task_photos(t)
-        
-        with st.form("form_act"):
-            action_text = st.text_area("조치내용", value=t.get('action_text') or "")
-            action_done_date = st.date_input("완료일", value=pd.to_datetime(t.get('action_done_date')).date() if t.get('action_done_date') else date.today())
-            if st.form_submit_button("조치 완료 저장", type="primary"):
-                update_task(t['id'], {
-                    "action_text": action_text,
-                    "action_done_date": str(action_done_date),
-                    "status": "완료"
-                })
-                st.balloons()
-                st.success("조치 완료되었습니다!")
-                st.rerun()
+        c_filter1, c_filter2 = st.columns(2)
+        with c_filter1:
+            sel_assignee = st.selectbox("👤 담당자 필터", ["전체"] + assignees)
+        with c_filter2:
+            sel_location = st.selectbox("🏢 장소 필터", ["전체"] + locations)
+            
+        # 필터 적용
+        filtered_tasks = target_tasks
+        if sel_assignee != "전체":
+            if sel_assignee == "미지정":
+                filtered_tasks = [t for t in filtered_tasks if not t.get('assignee')]
+            else:
+                filtered_tasks = [t for t in filtered_tasks if t.get('assignee') == sel_assignee]
+                
+        if sel_location != "전체":
+             filtered_tasks = [t for t in filtered_tasks if (t.get('location') or "미분류") == sel_location]
+
+        # --- 과제 선택 ---
+        if not filtered_tasks:
+            st.warning("조건에 맞는 과제가 없습니다.")
+        else:
+            # 딕셔너리로 매핑 (ID로 찾기 위해)
+            task_map = {f"[{t['issue_date']}] {t['location']} ({t.get('assignee') or '미지정'}) - {t['issue_text'][:20]}...": t for t in filtered_tasks}
+            sel_label = st.selectbox("대상 과제 선택", list(task_map.keys()), key="act_task_sel")
+            t = task_map[sel_label]
+            
+            st.divider()
+            st.info(f"📌 내용: {t['issue_text']}")
+            
+            # --- [복구 기능] 사진 추가 및 확인 ---
+            st.markdown("##### 📸 조치 전/후 사진 관리")
+            display_task_photos(t)
+            
+            # 바로 사진을 올릴 수 있는 Expander 추가
+            with st.expander("➕ 사진 추가 등록 (조치 사진 등)"):
+                act_photos = st.file_uploader("사진 업로드", type=["jpg", "png", "webp"], accept_multiple_files=True, key=f"act_up_{t['id']}")
+                if act_photos and st.button("사진 저장", key=f"btn_act_{t['id']}"):
+                    for f in act_photos:
+                        upload_photo(t['id'], f)
+                    st.success("사진이 등록되었습니다.")
+                    st.rerun()
+            
+            st.divider()
+
+            # --- 조치 완료 폼 ---
+            with st.form("form_act"):
+                st.markdown("##### 📝 조치 결과 입력")
+                action_text = st.text_area("조치내용", value=t.get('action_text') or "", height=100)
+                action_done_date = st.date_input("완료일", value=pd.to_datetime(t.get('action_done_date')).date() if t.get('action_done_date') else date.today())
+                
+                if st.form_submit_button("✅ 조치 완료 처리", type="primary"):
+                    update_task(t['id'], {
+                        "action_text": action_text,
+                        "action_done_date": str(action_done_date),
+                        "status": "완료"
+                    })
+                    st.balloons()
+                    st.success("조치 완료되었습니다! (목록에서 사라집니다)")
+                    st.rerun()
 
 # ---------------------------------------------------------
 # (E) 조회/관리
