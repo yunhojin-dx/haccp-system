@@ -363,27 +363,18 @@ with tabs[2]: # 계획 수립
         opts = [f"[{t['issue_date']}] {t['location']} - {t['issue_text'][:20]}..." for t in tasks]
         sel = st.selectbox("과제 선택", opts)
         t = tasks[opts.index(sel)]
-        
-        # 사진 보여주기 (개선전만)
+        st.info(f"내용: {t['issue_text']}")
         display_photos_grid(t.get('photos_before', []), "📸 개선 전 사진")
         
         with st.form("form_plan"):
-            # [수정] 문제 내용을 수정할 수 있도록 text_area로 변경
             st.markdown("**✏️ 내용 수정**")
             new_issue_text = st.text_area("개선 필요사항 (내용 수정 가능)", value=t['issue_text'], height=100)
-            
             c1, c2 = st.columns(2)
             assignee = c1.text_input("담당자", value=t.get('assignee') or "")
             plan_due = c2.date_input("계획일정", value=pd.to_datetime(t.get('plan_due')).date() if t.get('plan_due') else date.today())
             plan_text = st.text_area("계획내용", value=t.get('plan_text') or "")
-            
             if st.form_submit_button("저장"):
-                update_task(t['id'], {
-                    "issue_text": new_issue_text, # 수정된 내용 저장
-                    "assignee": assignee, 
-                    "plan_due": str(plan_due), 
-                    "plan_text": plan_text
-                })
+                update_task(t['id'], {"issue_text": new_issue_text, "assignee": assignee, "plan_due": str(plan_due), "plan_text": plan_text})
                 st.success("완료")
                 st.rerun()
 
@@ -417,7 +408,14 @@ with tabs[3]: # 조치 입력
             t = task_map[sel_label]
             
             st.divider()
-            st.info(f"📌 내용: {t['issue_text']}")
+            st.info(f"📌 문제 내용: {t['issue_text']}")
+            
+            # [추가] 계획 내용 표시 (문제 내용과 사진 사이)
+            plan_txt = t.get('plan_text')
+            if plan_txt:
+                st.success(f"📅 계획 내용: {plan_txt}")
+            else:
+                st.warning("📅 계획 내용: 수립된 계획이 없습니다.")
             
             c_p1, c_p2 = st.columns(2)
             with c_p1: display_photos_grid(t.get('photos_before', []), "🔴 개선 전")
