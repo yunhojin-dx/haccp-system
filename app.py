@@ -138,21 +138,15 @@ def delete_task_entirely(task_id: str, photos: list):
     sb.table("haccp_tasks").delete().eq("id", task_id).execute()
     clear_cache()
 
-# [중요] 압축 로직 최적화 (1024px, Quality 70)
 def compress_image(file_bytes: bytes, max_w=1024, quality=70) -> tuple[bytes, str]:
     img = Image.open(io.BytesIO(file_bytes))
-    
-    # PNG 등의 투명도(RGBA)를 흰색 배경 RGB로 변환 (JPG 저장 위함)
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
-    
     w, h = img.size
     if w > max_w:
         new_h = int(h * (max_w / w))
         img = img.resize((max_w, new_h), Image.Resampling.LANCZOS)
-
     out = io.BytesIO()
-    # 무조건 JPG로 변환하여 저장 (용량 최적화)
     img.save(out, format="JPEG", quality=quality, optimize=True)
     return out.getvalue(), "jpg"
 
@@ -161,12 +155,9 @@ def make_public_url(bucket: str, path: str) -> str:
 
 def upload_photo(task_id: str, uploaded_file, photo_type="BEFORE") -> dict:
     raw = uploaded_file.read()
-    # 압축 실행
     compressed, ext = compress_image(raw, max_w=1024, quality=70)
-    
     filename = f"{photo_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
     key = f"{task_id}/{filename}"
-    
     sb.storage.from_(BUCKET).upload(path=key, file=compressed, file_options={"content-type": "image/jpeg", "upsert": "false"})
     url = make_public_url(BUCKET, key)
     row = {"task_id": task_id, "storage_path": key, "public_url": url}
@@ -215,27 +206,18 @@ def export_excel(tasks: list[dict]) -> bytes:
         ws = writer.sheets[sheet_data]
         header_fmt = wb.add_format({"bold": True, "bg_color": "#EFEFEF", "border": 1, "align": "center", "valign": "vcenter"})
         cell_fmt = wb.add_format({"align": "center", "valign": "vcenter", "text_wrap": True, "border": 1})
-        
         for col, name in enumerate(df.columns): ws.write(0, col, name, header_fmt)
-        
         ws.set_column(0, 0, 30, cell_fmt); ws.set_column(1, 1, 12, cell_fmt); ws.set_column(2, 2, 15, cell_fmt); ws.set_column(3, 3, 40, cell_fmt); ws.set_column(4, 10, 15, cell_fmt)
-        
-        # [수정] 엑셀 헤더 분리
         base_col = len(df.columns)
         photo_headers = ["개선전_사진1", "개선전_사진2", "개선후_사진1", "개선후_사진2"]
         for i, ph in enumerate(photo_headers):
             ws.write(0, base_col + i, ph, header_fmt)
             ws.set_column(base_col + i, base_col + i, 22, cell_fmt)
-
         for r in range(1, len(df) + 1): ws.set_row(r, 100)
-
         for idx, t in enumerate(tasks):
             befores = t.get("photos_before", [])[:2]
             afters = t.get("photos_after", [])[:2]
-            
-            # [전1, 전2, 후1, 후2] 순서로 배치
             export_photos = befores + [None]*(2-len(befores)) + afters + [None]*(2-len(afters))
-
             for j, p in enumerate(export_photos):
                 if p and p.get("public_url"):
                     img_path = download_image_to_temp(p.get("public_url"))
@@ -245,7 +227,6 @@ def export_excel(tasks: list[dict]) -> bytes:
                             scale = min(150 / w, 130 / h) * 0.9
                             ws.insert_image(idx + 1, base_col + j, img_path, {"x_scale": scale, "y_scale": scale, "object_position": 1})
                         except: pass
-        
         sheet_sum = "요약"
         ws2 = wb.add_worksheet(sheet_sum)
         total = len(tasks)
@@ -382,16 +363,27 @@ with tabs[2]: # 계획 수립
         opts = [f"[{t['issue_date']}] {t['location']} - {t['issue_text'][:20]}..." for t in tasks]
         sel = st.selectbox("과제 선택", opts)
         t = tasks[opts.index(sel)]
-        st.info(f"내용: {t['issue_text']}")
+        
+        # 사진 보여주기 (개선전만)
         display_photos_grid(t.get('photos_before', []), "📸 개선 전 사진")
         
         with st.form("form_plan"):
+            # [수정] 문제 내용을 수정할 수 있도록 text_area로 변경
+            st.markdown("**✏️ 내용 수정**")
+            new_issue_text = st.text_area("개선 필요사항 (내용 수정 가능)", value=t['issue_text'], height=100)
+            
             c1, c2 = st.columns(2)
             assignee = c1.text_input("담당자", value=t.get('assignee') or "")
             plan_due = c2.date_input("계획일정", value=pd.to_datetime(t.get('plan_due')).date() if t.get('plan_due') else date.today())
             plan_text = st.text_area("계획내용", value=t.get('plan_text') or "")
+            
             if st.form_submit_button("저장"):
-                update_task(t['id'], {"assignee": assignee, "plan_due": str(plan_due), "plan_text": plan_text})
+                update_task(t['id'], {
+                    "issue_text": new_issue_text, # 수정된 내용 저장
+                    "assignee": assignee, 
+                    "plan_due": str(plan_due), 
+                    "plan_text": plan_text
+                })
                 st.success("완료")
                 st.rerun()
 
