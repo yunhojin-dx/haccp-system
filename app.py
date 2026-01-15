@@ -20,18 +20,13 @@ from supabase import create_client
 # =========================================================
 st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide", initial_sidebar_state="collapsed")
 
-# [이미지 처리를 위한 함수]
 def get_image_base64(file_path):
-    with open(file_path, "rb") as f:
-        data = f.read()
+    with open(file_path, "rb") as f: data = f.read()
     return base64.b64encode(data).decode()
 
-# [디자인 CSS]
 st.markdown("""
 <style>
     .block-container { padding-top: 3rem; padding-bottom: 3rem; font-family: 'Pretendard', sans-serif; }
-    
-    /* 헤더 스타일 */
     .header-container { display: flex; align-items: center; padding-bottom: 2rem; margin-bottom: 1rem; border-bottom: 2px solid #f1f3f5; }
     .header-image-container { flex: 0 0 auto; margin-right: 2.5rem; }
     .header-image-container img { width: 140px; height: auto; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
@@ -39,8 +34,6 @@ st.markdown("""
     .header-text-container { flex: 1; }
     h1.main-title { font-size: 3.2rem !important; font-weight: 800 !important; margin: 0 !important; color: #212529; letter-spacing: -1px; }
     .sub-caption { font-size: 1.2rem; color: #868e96; margin-top: 0.5rem; font-weight: 500; }
-
-    /* 탭 스타일 */
     div[data-testid="stTabs"] { gap: 0px; }
     div[data-testid="stTabs"] button[data-testid="stTab"] { background-color: #f8f9fa; color: #495057; border: 1px solid #dee2e6; border-bottom: none; border-radius: 10px 10px 0 0; padding: 1rem 2rem; font-weight: 700; margin-right: 4px; }
     div[data-testid="stTabs"] button[data-testid="stTab"][aria-selected="true"] { background-color: #ffffff; color: #e03131; border-top: 3px solid #e03131; border-bottom: 2px solid #ffffff; margin-bottom: -2px; z-index: 10; }
@@ -48,7 +41,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# [헤더 출력]
 logo_html = ""
 if os.path.exists("logo.png"):
     img_b64 = get_image_base64("logo.png")
@@ -86,53 +78,60 @@ sb = get_supabase()
 
 
 # =========================================================
-# 2) 핵심 로직 (캐싱 적용으로 에러 방지)
+# 2) 핵심 로직 (캐싱 + 사진 구분 로직 추가)
 # =========================================================
-# [중요] ttl=10 : 10초 동안은 DB를 다시 부르지 않고 저장된 값을 씀 (에러 방지 핵심)
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def fetch_tasks_all() -> list[dict]:
     try:
-        # 과제 데이터 조회
         res = sb.table("haccp_tasks").select("*").order("issue_date", desc=True).execute()
         tasks = res.data or []
-        
         if not tasks: return []
 
-        # 사진 데이터 조회
         t_ids = [t["id"] for t in tasks]
         res_p = sb.table("haccp_task_photos").select("*").in_("task_id", t_ids).execute()
         photos = res_p.data or []
         
-        # 사진 매핑
-        photo_map = {}
+        # [수정] 사진을 BEFORE(개선전)와 AFTER(개선후)로 분류하여 매핑
+        photo_map_before = {}
+        photo_map_after = {}
+        
         for p in photos:
             tid = p["task_id"]
             if "id" in p and "photo_id" not in p: p["photo_id"] = p["id"]
-            if tid not in photo_map: photo_map[tid] = []
-            photo_map[tid].append(p)
+            
+            # 파일 경로에 'AFTER_'가 포함되어 있으면 개선후 사진으로 분류
+            path = p.get('storage_path', '')
+            if '/AFTER_' in path:
+                if tid not in photo_map_after: photo_map_after[tid] = []
+                photo_map_after[tid].append(p)
+            else:
+                # 그 외에는 모두 개선전(BEFORE) 사진으로 간주
+                if tid not in photo_map_before: photo_map_before[tid] = []
+                photo_map_before[tid].append(p)
             
         for t in tasks:
-            t["photos"] = photo_map.get(t["id"], [])
+            t["photos_before"] = photo_map_before.get(t["id"], [])
+            t["photos_after"] = photo_map_after.get(t["id"], [])
+            # 호환성을 위해 전체 리스트도 유지
+            t["photos"] = t["photos_before"] + t["photos_after"]
             
         return tasks
     except Exception as e:
-        # 에러 발생 시 로그만 남기고 빈 리스트 반환 (화면 깨짐 방지)
         print(f"DB Error: {e}")
         return []
 
-# 데이터 갱신이 필요할 때 캐시를 비우는 함수
 def clear_cache():
     fetch_tasks_all.clear()
 
 def insert_task(issue_date, location, issue_text, reporter):
     row = {"issue_date": str(issue_date), "location": location.strip(), "issue_text": issue_text.strip(), "reporter": reporter.strip(), "status": "진행중"}
     res = sb.table("haccp_tasks").insert(row).execute()
-    clear_cache() # 등록 후 캐시 초기화
+    clear_cache()
     return res.data[0]["id"]
 
 def update_task(task_id, patch):
     sb.table("haccp_tasks").update(patch).eq("id", task_id).execute()
-    clear_cache() # 수정 후 캐시 초기화
+    clear_cache()
 
 def delete_task_entirely(task_id: str, photos: list):
     if photos:
@@ -141,9 +140,8 @@ def delete_task_entirely(task_id: str, photos: list):
             try: sb.storage.from_(BUCKET).remove(paths)
             except: pass 
     sb.table("haccp_tasks").delete().eq("id", task_id).execute()
-    clear_cache() # 삭제 후 캐시 초기화
+    clear_cache()
 
-# 이미지 업로드/삭제
 def compress_image(file_bytes: bytes, max_w=1280, quality=80) -> tuple[bytes, str]:
     img = Image.open(io.BytesIO(file_bytes))
     img = img.convert("RGB")
@@ -158,15 +156,19 @@ def compress_image(file_bytes: bytes, max_w=1280, quality=80) -> tuple[bytes, st
 def make_public_url(bucket: str, path: str) -> str:
     return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
 
-def upload_photo(task_id: str, uploaded_file) -> dict:
+# [수정] 업로드 시 type(BEFORE/AFTER)을 받아서 파일명에 기록
+def upload_photo(task_id: str, uploaded_file, photo_type="BEFORE") -> dict:
     raw = uploaded_file.read()
     compressed, ext = compress_image(raw, max_w=1400, quality=82)
-    key = f"{task_id}/{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
+    # 파일명에 타입(BEFORE/AFTER)을 명시
+    filename = f"{photo_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
+    key = f"{task_id}/{filename}"
+    
     sb.storage.from_(BUCKET).upload(path=key, file=compressed, file_options={"content-type": "image/jpeg", "upsert": "false"})
     url = make_public_url(BUCKET, key)
     row = {"task_id": task_id, "storage_path": key, "public_url": url}
     sb.table("haccp_task_photos").insert(row).execute()
-    clear_cache() # 사진 변경도 데이터 갱신
+    clear_cache()
     return row
 
 def delete_photo(photo_id: str, storage_path: str):
@@ -175,7 +177,6 @@ def delete_photo(photo_id: str, storage_path: str):
     sb.table("haccp_task_photos").delete().eq("id", photo_id).execute()
     clear_cache()
 
-# 엑셀 다운로드 등 유틸
 def download_image_to_temp(url: str) -> str | None:
     try:
         r = requests.get(url, timeout=5)
@@ -186,6 +187,7 @@ def download_image_to_temp(url: str) -> str | None:
         return path
     except: return None
 
+# [수정] 엑셀 출력 시 Before/After 컬럼 분리
 def export_excel(tasks: list[dict]) -> bytes:
     rows = []
     for t in tasks:
@@ -211,28 +213,39 @@ def export_excel(tasks: list[dict]) -> bytes:
         ws = writer.sheets[sheet_data]
         header_fmt = wb.add_format({"bold": True, "bg_color": "#EFEFEF", "border": 1, "align": "center", "valign": "vcenter"})
         cell_fmt = wb.add_format({"align": "center", "valign": "vcenter", "text_wrap": True, "border": 1})
+        
         for col, name in enumerate(df.columns): ws.write(0, col, name, header_fmt)
+        
         ws.set_column(0, 0, 30, cell_fmt); ws.set_column(1, 1, 12, cell_fmt); ws.set_column(2, 2, 15, cell_fmt); ws.set_column(3, 3, 40, cell_fmt); ws.set_column(4, 10, 15, cell_fmt)
-        img_cols = ["사진1", "사진2", "사진3"]
+        
+        # [수정] 사진 컬럼 분리 (개선전 2개, 개선후 2개)
         base_col = len(df.columns)
-        for i, c in enumerate(img_cols):
-            ws.write(0, base_col + i, c, header_fmt)
+        photo_headers = ["개선전_사진1", "개선전_사진2", "개선후_사진1", "개선후_사진2"]
+        for i, ph in enumerate(photo_headers):
+            ws.write(0, base_col + i, ph, header_fmt)
             ws.set_column(base_col + i, base_col + i, 22, cell_fmt)
+
         for r in range(1, len(df) + 1): ws.set_row(r, 100)
+
         for idx, t in enumerate(tasks):
-            photos = t.get("photos") or []
-            if not isinstance(photos, list): photos = []
-            photos = photos[:3]
-            for j, p in enumerate(photos):
-                url = p.get("public_url")
-                if not url: continue
-                img_path = download_image_to_temp(url)
-                if not img_path: continue
-                try:
-                    with Image.open(img_path) as img: w, h = img.size
-                    scale = min(150 / w, 130 / h) * 0.9
-                    ws.insert_image(idx + 1, base_col + j, img_path, {"x_scale": scale, "y_scale": scale, "object_position": 1})
-                except: pass
+            # 개선전/후 사진 분리 가져오기
+            befores = t.get("photos_before", [])[:2] # 최대 2장
+            afters = t.get("photos_after", [])[:2]   # 최대 2장
+            
+            # 엑셀 삽입용 리스트 (전1, 전2, 후1, 후2 순서)
+            # 빈 자리는 None으로 채워서 인덱스 맞춤
+            export_photos = befores + [None]*(2-len(befores)) + afters + [None]*(2-len(afters))
+
+            for j, p in enumerate(export_photos):
+                if p and p.get("public_url"):
+                    img_path = download_image_to_temp(p.get("public_url"))
+                    if img_path:
+                        try:
+                            with Image.open(img_path) as img: w, h = img.size
+                            scale = min(150 / w, 130 / h) * 0.9
+                            ws.insert_image(idx + 1, base_col + j, img_path, {"x_scale": scale, "y_scale": scale, "object_position": 1})
+                        except: pass
+        
         sheet_sum = "요약"
         ws2 = wb.add_worksheet(sheet_sum)
         total = len(tasks)
@@ -244,16 +257,15 @@ def export_excel(tasks: list[dict]) -> bytes:
         ws2.write(4, 0, "완료율(%)"); ws2.write(4, 1, round(rate, 1))
     return out.getvalue()
 
-def display_task_photos(t):
-    photos = t.get("photos") or []
-    if not isinstance(photos, list): photos = []
-    if photos:
-        st.markdown("📸 **현장 사진**")
-        cols = st.columns(4) 
-        for i, p in enumerate(photos):
-            with cols[i % 4]: st.image(p.get("public_url"), use_container_width=True)
-    else: st.caption("등록된 사진이 없습니다.")
-    return photos
+# [수정] 사진 표시 함수 분리 (Before / After 따로 출력 가능하게)
+def display_photos_grid(photos, title=None):
+    if title: st.markdown(f"**{title}**")
+    if not photos:
+        st.caption("사진 없음")
+        return
+    cols = st.columns(4)
+    for i, p in enumerate(photos):
+        with cols[i % 4]: st.image(p.get("public_url"), use_container_width=True)
 
 
 # =========================================================
@@ -261,10 +273,7 @@ def display_task_photos(t):
 # =========================================================
 tabs = st.tabs(["📊 대시보드", "📝 문제등록", "📅 계획수립", "🛠️ 조치입력", "🔍 조회/관리"])
 
-# ---------------------------------------------------------
-# (A) 대시보드/보고서
-# ---------------------------------------------------------
-with tabs[0]:
+with tabs[0]: # 대시보드
     raw_tasks = fetch_tasks_all()
     if not raw_tasks:
         st.info("등록된 데이터가 없습니다.")
@@ -276,8 +285,7 @@ with tabs[0]:
         df_all['Week_Label'] = df_all['issue_date'].apply(lambda x: f"{x.year}-{x.isocalendar()[1]:02d}주차")
 
         c1, c2 = st.columns([1, 4])
-        with c1:
-            period_mode = st.selectbox("기간 기준", ["월간", "주간", "연간", "기간지정"], index=0)
+        with c1: period_mode = st.selectbox("기간 기준", ["월간", "주간", "연간", "기간지정"], index=0)
         
         filtered_df = df_all.copy()
         today = date.today()
@@ -288,26 +296,20 @@ with tabs[0]:
                 this_month = datetime.now().strftime('%Y-%m')
                 default_m = [this_month] if this_month in all_months else (all_months[:1] if all_months else [])
                 selected_months = st.multiselect("조회할 월 선택", all_months, default=default_m)
-                if selected_months: filtered_df = df_all[df_all['YYYY-MM'].isin(selected_months)]
-                else: filtered_df = df_all.iloc[0:0]
-
+                filtered_df = df_all[df_all['YYYY-MM'].isin(selected_months)] if selected_months else df_all.iloc[0:0]
             elif period_mode == "주간":
                 all_weeks = sorted(df_all['Week_Label'].unique(), reverse=True)
                 this_year, this_week, _ = datetime.now().isocalendar()
                 this_week_label = f"{this_year}-{this_week:02d}주차"
                 default_w = [this_week_label] if this_week_label in all_weeks else (all_weeks[:1] if all_weeks else [])
                 selected_weeks = st.multiselect("조회할 주차 선택", all_weeks, default=default_w)
-                if selected_weeks: filtered_df = df_all[df_all['Week_Label'].isin(selected_weeks)]
-                else: filtered_df = df_all.iloc[0:0]
-
+                filtered_df = df_all[df_all['Week_Label'].isin(selected_weeks)] if selected_weeks else df_all.iloc[0:0]
             elif period_mode == "연간":
                 all_years = sorted(df_all['Year'].unique(), reverse=True)
                 this_year = datetime.now().year
                 default_y = [this_year] if this_year in all_years else (all_years[:1] if all_years else [])
                 selected_years = st.multiselect("조회할 연도 선택", all_years, default=default_y)
-                if selected_years: filtered_df = df_all[df_all['Year'].isin(selected_years)]
-                else: filtered_df = df_all.iloc[0:0]
-
+                filtered_df = df_all[df_all['Year'].isin(selected_years)] if selected_years else df_all.iloc[0:0]
             else: 
                 d_col1, d_col2 = st.columns(2)
                 start_d = d_col1.date_input("시작", value=today - timedelta(weeks=1))
@@ -326,11 +328,13 @@ with tabs[0]:
         with m4:
             if st.button("📥 엑셀 다운로드", type="primary", use_container_width=True):
                 with st.spinner("생성 중..."):
+                    # to_dict 시에 사진 정보도 포함되도록 원본 리스트에서 매칭해야 함 (df 변환 시 누락 방지)
+                    # 여기서는 간단히 df -> dict 후 사진 정보는 fetch_tasks_all의 구조를 따르므로 괜찮음
+                    # 하지만 filtered_df는 사진 필드가 object라 잘 살아있음.
                     st.download_button("⬇️ 파일 받기", data=export_excel(filtered_df.to_dict('records')), file_name=f"HACCP_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         st.divider()
-        if total_cnt == 0:
-            st.warning("데이터가 없습니다.")
+        if total_cnt == 0: st.warning("데이터가 없습니다.")
         else:
             col_chart, col_table = st.columns([1, 1])
             filtered_df['공정/장소'] = filtered_df['location'].fillna("미분류").str.strip()
@@ -353,11 +357,7 @@ with tabs[0]:
                 st.markdown("##### 📋 상세 집계")
                 st.dataframe(loc_stats.rename(columns={'공정/장소': '장소'}), use_container_width=True, hide_index=True, height=300)
 
-
-# ---------------------------------------------------------
-# (B) 문제 등록
-# ---------------------------------------------------------
-with tabs[1]:
+with tabs[1]: # 문제 등록
     st.subheader("📝 문제 등록")
     with st.form("form_register", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
@@ -365,7 +365,8 @@ with tabs[1]:
         location = c2.text_input("장소", placeholder="예: 포장실")
         reporter = c3.text_input("발견자", placeholder="예: 홍길동")
         issue_text = st.text_area("내용", placeholder="내용 입력", height=100)
-        photos = st.file_uploader("사진", type=["jpg", "png", "webp"], accept_multiple_files=True)
+        # [수정] 여기서 올리는 사진은 기본값(BEFORE)으로 저장됨
+        photos = st.file_uploader("사진 (개선 전)", type=["jpg", "png", "webp"], accept_multiple_files=True)
         if st.form_submit_button("등록", type="primary"):
             if not (location and reporter and issue_text):
                 st.error("필수 항목 누락")
@@ -373,15 +374,11 @@ with tabs[1]:
                 try:
                     tid = insert_task(issue_date, location, issue_text, reporter)
                     if photos:
-                        for f in photos: upload_photo(tid, f)
+                        for f in photos: upload_photo(tid, f, photo_type="BEFORE")
                     st.success("저장 완료!")
                 except Exception as e: st.error(f"오류: {e}")
 
-
-# ---------------------------------------------------------
-# (C) 계획 수립
-# ---------------------------------------------------------
-with tabs[2]:
+with tabs[2]: # 계획 수립
     st.subheader("📅 계획 수립")
     tasks = fetch_tasks_all()
     tasks = [t for t in tasks if t['status'] != '완료'] 
@@ -391,7 +388,8 @@ with tabs[2]:
         sel = st.selectbox("과제 선택", opts)
         t = tasks[opts.index(sel)]
         st.info(f"내용: {t['issue_text']}")
-        display_task_photos(t)
+        display_photos_grid(t.get('photos_before', []), "📸 개선 전 사진")
+        
         with st.form("form_plan"):
             c1, c2 = st.columns(2)
             assignee = c1.text_input("담당자", value=t.get('assignee') or "")
@@ -402,22 +400,15 @@ with tabs[2]:
                 st.success("완료")
                 st.rerun()
 
-
-# ---------------------------------------------------------
-# (D) 조치 결과 입력 (기능 강화: 필터/미지정/사진추가)
-# ---------------------------------------------------------
-with tabs[3]:
+with tabs[3]: # 조치 입력
     st.subheader("🛠️ 조치 결과 입력")
-    
     all_tasks = fetch_tasks_all()
-    # 완료되지 않은 과제만 기본 대상
     target_tasks = [t for t in all_tasks if t['status'] != '완료']
 
     if not target_tasks:
         st.info("조치할 미완료 과제가 없습니다.")
         if st.button("새로고침"): clear_cache(); st.rerun()
     else:
-        # 필터링 UI
         assignees = sorted(list(set([t.get('assignee') or "미지정" for t in target_tasks])))
         locations = sorted(list(set([t.get('location') or "미분류" for t in target_tasks])))
         
@@ -432,8 +423,7 @@ with tabs[3]:
         if sel_location != "전체":
              filtered_tasks = [t for t in filtered_tasks if (t.get('location') or "미분류") == sel_location]
 
-        if not filtered_tasks:
-            st.warning("조건에 맞는 과제가 없습니다.")
+        if not filtered_tasks: st.warning("조건에 맞는 과제가 없습니다.")
         else:
             task_map = {f"[{t['issue_date']}] {t['location']} ({t.get('assignee') or '미지정'}) - {t['issue_text'][:20]}...": t for t in filtered_tasks}
             sel_label = st.selectbox("대상 과제 선택", list(task_map.keys()))
@@ -442,12 +432,16 @@ with tabs[3]:
             st.divider()
             st.info(f"📌 내용: {t['issue_text']}")
             
-            # [기능 강화] 사진 추가/관리
-            display_task_photos(t)
-            with st.expander("➕ 사진 추가 (조치 사진 등)"):
+            # [수정] 사진 분리 표시
+            c_p1, c_p2 = st.columns(2)
+            with c_p1: display_photos_grid(t.get('photos_before', []), "🔴 개선 전")
+            with c_p2: display_photos_grid(t.get('photos_after', []), "🟢 개선 후 (현재)")
+
+            with st.expander("➕ 개선 완료(After) 사진 추가"):
+                # [수정] 여기서 올리면 photo_type="AFTER"로 저장
                 act_photos = st.file_uploader("사진 업로드", type=["jpg", "png", "webp"], accept_multiple_files=True, key=f"act_up_{t['id']}")
                 if act_photos and st.button("사진 저장", key=f"btn_act_{t['id']}"):
-                    for f in act_photos: upload_photo(t['id'], f)
+                    for f in act_photos: upload_photo(t['id'], f, photo_type="AFTER")
                     st.success("등록됨")
                     st.rerun()
             
@@ -461,11 +455,7 @@ with tabs[3]:
                     st.success("완료 처리되었습니다.")
                     st.rerun()
 
-
-# ---------------------------------------------------------
-# (E) 통합 조회 및 관리
-# ---------------------------------------------------------
-with tabs[4]:
+with tabs[4]: # 조회/관리
     st.subheader("🔍 통합 조회 및 관리")
     c1, c2, c3 = st.columns([1, 1, 2])
     status_filter = c1.selectbox("상태", ["전체", "진행중", "완료"])
@@ -480,8 +470,7 @@ with tabs[4]:
         if txt_filter and txt_filter not in (t['issue_text'] or ""): continue
         filtered.append(t)
         
-    if not filtered:
-        st.warning("데이터가 없습니다.")
+    if not filtered: st.warning("데이터가 없습니다.")
     else:
         df_list = pd.DataFrame(filtered)
         df_disp = df_list[['issue_date', 'location', 'issue_text', 'status', 'action_done_date']].copy()
@@ -501,20 +490,28 @@ with tabs[4]:
                 st.success("삭제됨")
                 st.rerun()
 
-            display_task_photos(target)
+            # [수정] 조회 시에도 분리해서 보여줌
+            display_photos_grid(target.get('photos_before', []), "🔴 개선 전")
+            display_photos_grid(target.get('photos_after', []), "🟢 개선 후")
             
-            # 사진 삭제
-            if target.get('photos'):
+            # 사진 삭제 (통합 리스트로 관리)
+            all_p = target.get('photos', [])
+            if all_p:
                 with st.expander("사진 삭제 모드"):
                     cols = st.columns(4)
-                    for i, p in enumerate(target['photos']):
+                    for i, p in enumerate(all_p):
                         with cols[i%4]:
-                            st.image(p['public_url'], width=100)
+                            # 어떤 타입인지 표시
+                            ptype = "🟢후" if "/AFTER_" in p.get('storage_path', '') else "🔴전"
+                            st.image(p['public_url'], caption=ptype, width=100)
                             if st.button("삭제", key=f"del_{p['photo_id']}"): delete_photo(p['photo_id'], p['storage_path']); st.rerun()
             
-            # 사진 추가
-            new_p = st.file_uploader("사진 추가", accept_multiple_files=True, key="add_p_man")
-            if new_p and st.button("업로드"):
-                for f in new_p: upload_photo(target['id'], f)
+            # 사진 추가 (타입 선택 가능하게)
+            c_add1, c_add2 = st.columns([1, 3])
+            add_type = c_add1.radio("추가할 사진 타입", ["개선전(BEFORE)", "개선후(AFTER)"], horizontal=True)
+            new_p = c_add2.file_uploader("사진 추가", accept_multiple_files=True, key="add_p_man")
+            if new_p and c_add2.button("업로드"):
+                pt = "AFTER" if "개선후" in add_type else "BEFORE"
+                for f in new_p: upload_photo(target['id'], f, photo_type=pt)
                 st.success("완료")
                 st.rerun()
