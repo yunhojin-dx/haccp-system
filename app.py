@@ -16,13 +16,12 @@ from PIL import Image
 from supabase import create_client
 
 # =========================================================
-# 0) 기본 UI 설정 (와이드 모드)
+# 0) 기본 UI 설정
 # =========================================================
 st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide", initial_sidebar_state="collapsed")
 
 # [이미지 처리를 위한 함수]
 def get_image_base64(file_path):
-    """로컬 이미지를 HTML에서 쓸 수 있게 Base64로 변환"""
     with open(file_path, "rb") as f:
         data = f.read()
     return base64.b64encode(data).decode()
@@ -30,105 +29,26 @@ def get_image_base64(file_path):
 # [디자인 CSS]
 st.markdown("""
 <style>
-    /* 폰트 및 기본 여백 */
-    .block-container {
-        padding-top: 3rem;
-        padding-bottom: 3rem;
-        font-family: 'Pretendard', 'Malgun Gothic', sans-serif;
-    }
+    .block-container { padding-top: 3rem; padding-bottom: 3rem; font-family: 'Pretendard', sans-serif; }
     
-    /* --- 헤더 영역 디자인 --- */
-    .header-container {
-        display: flex;
-        align-items: center; /* 수직 중앙 정렬 */
-        padding-bottom: 2rem;
-        margin-bottom: 1rem;
-        border-bottom: 2px solid #f1f3f5; /* 하단 구분선 */
-    }
-    
-    /* 이미지 영역 */
-    .header-image-container {
-        flex: 0 0 auto;
-        margin-right: 2.5rem; /* 이미지-제목 사이 간격 (넓게) */
-    }
-    
-    .header-image-container img {
-        width: 140px; /* 로고 크기 */
-        height: auto;
-        border-radius: 12px; /* 둥근 모서리 */
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08); /* 부드러운 그림자 */
-    }
+    /* 헤더 스타일 */
+    .header-container { display: flex; align-items: center; padding-bottom: 2rem; margin-bottom: 1rem; border-bottom: 2px solid #f1f3f5; }
+    .header-image-container { flex: 0 0 auto; margin-right: 2.5rem; }
+    .header-image-container img { width: 140px; height: auto; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+    .fallback-icon { font-size: 5rem; line-height: 1; background: #f8f9fa; padding: 10px; border-radius: 12px; }
+    .header-text-container { flex: 1; }
+    h1.main-title { font-size: 3.2rem !important; font-weight: 800 !important; margin: 0 !important; color: #212529; letter-spacing: -1px; }
+    .sub-caption { font-size: 1.2rem; color: #868e96; margin-top: 0.5rem; font-weight: 500; }
 
-    /* 대체 아이콘 */
-    .fallback-icon {
-        font-size: 5rem;
-        line-height: 1;
-        background: #f8f9fa;
-        padding: 10px;
-        border-radius: 12px;
-    }
-    
-    /* 텍스트 영역 */
-    .header-text-container {
-        flex: 1;
-    }
-
-    /* 메인 제목 */
-    h1.main-title { 
-        font-size: 3.2rem !important; 
-        font-weight: 800 !important; 
-        margin: 0 !important;
-        color: #212529;
-        letter-spacing: -1px;
-    }
-    
-    /* 부제목 */
-    .sub-caption {
-        font-size: 1.2rem;
-        color: #868e96;
-        margin-top: 0.5rem;
-        font-weight: 500;
-    }
-
-    /* --- 탭(책갈피) 스타일 --- */
-    div[data-testid="stTabs"] {
-        gap: 0px;
-    }
-
-    /* 탭 버튼 기본 */
-    div[data-testid="stTabs"] button[data-testid="stTab"] {
-        background-color: #f8f9fa;
-        color: #495057;
-        border: 1px solid #dee2e6;
-        border-bottom: none;
-        border-radius: 10px 10px 0 0;
-        padding: 1rem 2rem;
-        font-size: 1rem;
-        font-weight: 700;
-        transition: all 0.2s;
-        margin-right: 4px;
-    }
-
-    /* 탭 선택됨 */
-    div[data-testid="stTabs"] button[data-testid="stTab"][aria-selected="true"] {
-        background-color: #ffffff;
-        color: #e03131; /* 강조색 (빨강) */
-        border-top: 3px solid #e03131;
-        border-bottom: 2px solid #ffffff; /* 하단 선 덮기 */
-        margin-bottom: -2px;
-        z-index: 10;
-    }
-    
-    /* 탭 내용 영역 상단 테두리 */
-    div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] {
-        border-top: 2px solid #dee2e6; 
-        margin-top: -2px;
-    }
-
+    /* 탭 스타일 */
+    div[data-testid="stTabs"] { gap: 0px; }
+    div[data-testid="stTabs"] button[data-testid="stTab"] { background-color: #f8f9fa; color: #495057; border: 1px solid #dee2e6; border-bottom: none; border-radius: 10px 10px 0 0; padding: 1rem 2rem; font-weight: 700; margin-right: 4px; }
+    div[data-testid="stTabs"] button[data-testid="stTab"][aria-selected="true"] { background-color: #ffffff; color: #e03131; border-top: 3px solid #e03131; border-bottom: 2px solid #ffffff; margin-bottom: -2px; z-index: 10; }
+    div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] { border-top: 2px solid #dee2e6; margin-top: -2px; }
 </style>
 """, unsafe_allow_html=True)
 
-# [헤더 출력 로직]
+# [헤더 출력]
 logo_html = ""
 if os.path.exists("logo.png"):
     img_b64 = get_image_base64("logo.png")
@@ -138,9 +58,7 @@ else:
 
 st.markdown(f"""
 <div class="header-container">
-    <div class="header-image-container">
-        {logo_html}
-    </div>
+    <div class="header-image-container">{logo_html}</div>
     <div class="header-text-container">
         <h1 class="main-title">천안공장 위생 개선관리</h1>
         <p class="sub-caption">스마트 해썹(HACCP) 대응을 위한 현장 개선 데이터 관리 시스템</p>
@@ -150,23 +68,16 @@ st.markdown(f"""
 
 
 # =========================================================
-# 1) Secrets 체크
+# 1) Secrets & DB 연결
 # =========================================================
-REQUIRED_SECRETS = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_BUCKET"]
-missing = [k for k in REQUIRED_SECRETS if k not in st.secrets or not str(st.secrets.get(k, "")).strip()]
-if missing:
-    st.error(f"🚨 Secrets 누락: {', '.join(missing)}")
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"].strip()
+    SUPABASE_SERVICE_KEY = st.secrets["SUPABASE_SERVICE_KEY"].strip()
+    BUCKET = st.secrets["SUPABASE_BUCKET"].strip()
+except:
+    st.error("🚨 Secrets 설정이 누락되었습니다.")
     st.stop()
 
-SUPABASE_URL = st.secrets["SUPABASE_URL"].strip()
-SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"].strip()
-SUPABASE_SERVICE_KEY = st.secrets["SUPABASE_SERVICE_KEY"].strip()
-BUCKET = st.secrets["SUPABASE_BUCKET"].strip()
-
-
-# =========================================================
-# 2) Supabase 연결
-# =========================================================
 @st.cache_resource
 def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -175,8 +86,64 @@ sb = get_supabase()
 
 
 # =========================================================
-# 3) 유틸 함수들
+# 2) 핵심 로직 (캐싱 적용으로 에러 방지)
 # =========================================================
+# [중요] ttl=10 : 10초 동안은 DB를 다시 부르지 않고 저장된 값을 씀 (에러 방지 핵심)
+@st.cache_data(ttl=10, show_spinner=False)
+def fetch_tasks_all() -> list[dict]:
+    try:
+        # 과제 데이터 조회
+        res = sb.table("haccp_tasks").select("*").order("issue_date", desc=True).execute()
+        tasks = res.data or []
+        
+        if not tasks: return []
+
+        # 사진 데이터 조회
+        t_ids = [t["id"] for t in tasks]
+        res_p = sb.table("haccp_task_photos").select("*").in_("task_id", t_ids).execute()
+        photos = res_p.data or []
+        
+        # 사진 매핑
+        photo_map = {}
+        for p in photos:
+            tid = p["task_id"]
+            if "id" in p and "photo_id" not in p: p["photo_id"] = p["id"]
+            if tid not in photo_map: photo_map[tid] = []
+            photo_map[tid].append(p)
+            
+        for t in tasks:
+            t["photos"] = photo_map.get(t["id"], [])
+            
+        return tasks
+    except Exception as e:
+        # 에러 발생 시 로그만 남기고 빈 리스트 반환 (화면 깨짐 방지)
+        print(f"DB Error: {e}")
+        return []
+
+# 데이터 갱신이 필요할 때 캐시를 비우는 함수
+def clear_cache():
+    fetch_tasks_all.clear()
+
+def insert_task(issue_date, location, issue_text, reporter):
+    row = {"issue_date": str(issue_date), "location": location.strip(), "issue_text": issue_text.strip(), "reporter": reporter.strip(), "status": "진행중"}
+    res = sb.table("haccp_tasks").insert(row).execute()
+    clear_cache() # 등록 후 캐시 초기화
+    return res.data[0]["id"]
+
+def update_task(task_id, patch):
+    sb.table("haccp_tasks").update(patch).eq("id", task_id).execute()
+    clear_cache() # 수정 후 캐시 초기화
+
+def delete_task_entirely(task_id: str, photos: list):
+    if photos:
+        paths = [p.get("storage_path") for p in photos if p.get("storage_path")]
+        if paths:
+            try: sb.storage.from_(BUCKET).remove(paths)
+            except: pass 
+    sb.table("haccp_tasks").delete().eq("id", task_id).execute()
+    clear_cache() # 삭제 후 캐시 초기화
+
+# 이미지 업로드/삭제
 def compress_image(file_bytes: bytes, max_w=1280, quality=80) -> tuple[bytes, str]:
     img = Image.open(io.BytesIO(file_bytes))
     img = img.convert("RGB")
@@ -199,63 +166,19 @@ def upload_photo(task_id: str, uploaded_file) -> dict:
     url = make_public_url(BUCKET, key)
     row = {"task_id": task_id, "storage_path": key, "public_url": url}
     sb.table("haccp_task_photos").insert(row).execute()
+    clear_cache() # 사진 변경도 데이터 갱신
     return row
 
 def delete_photo(photo_id: str, storage_path: str):
     try: sb.storage.from_(BUCKET).remove([storage_path])
     except: pass
     sb.table("haccp_task_photos").delete().eq("id", photo_id).execute()
+    clear_cache()
 
-def delete_task_entirely(task_id: str, photos: list):
-    if photos:
-        paths = [p.get("storage_path") for p in photos if p.get("storage_path")]
-        if paths:
-            try: sb.storage.from_(BUCKET).remove(paths)
-            except: pass 
-    sb.table("haccp_tasks").delete().eq("id", task_id).execute()
-
-def fetch_tasks_all() -> list[dict]:
-    try:
-        res = sb.table("haccp_tasks").select("*").order("issue_date", desc=True).execute()
-        tasks = res.data or []
-    except Exception as e:
-        st.error(f"데이터 조회 실패: {e}")
-        return []
-
-    if not tasks: return []
-
-    t_ids = [t["id"] for t in tasks]
-    if not t_ids: return tasks
-
-    try:
-        res_p = sb.table("haccp_task_photos").select("*").in_("task_id", t_ids).execute()
-        photos = res_p.data or []
-        
-        photo_map = {}
-        for p in photos:
-            tid = p["task_id"]
-            if "id" in p and "photo_id" not in p: p["photo_id"] = p["id"]
-            if tid not in photo_map: photo_map[tid] = []
-            photo_map[tid].append(p)
-            
-        for t in tasks:
-            t["photos"] = photo_map.get(t["id"], [])
-            
-    except: pass 
-
-    return tasks
-
-def insert_task(issue_date, location, issue_text, reporter):
-    row = {"issue_date": str(issue_date), "location": location.strip(), "issue_text": issue_text.strip(), "reporter": reporter.strip(), "status": "진행중"}
-    res = sb.table("haccp_tasks").insert(row).execute()
-    return res.data[0]["id"]
-
-def update_task(task_id, patch):
-    sb.table("haccp_tasks").update(patch).eq("id", task_id).execute()
-
+# 엑셀 다운로드 등 유틸
 def download_image_to_temp(url: str) -> str | None:
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=5)
         r.raise_for_status()
         fd, path = tempfile.mkstemp(suffix=".jpg")
         os.close(fd)
@@ -286,21 +209,16 @@ def export_excel(tasks: list[dict]) -> bytes:
         df.to_excel(writer, sheet_name=sheet_data, index=False, startrow=1, header=False)
         wb = writer.book
         ws = writer.sheets[sheet_data]
-        
         header_fmt = wb.add_format({"bold": True, "bg_color": "#EFEFEF", "border": 1, "align": "center", "valign": "vcenter"})
         cell_fmt = wb.add_format({"align": "center", "valign": "vcenter", "text_wrap": True, "border": 1})
-        
         for col, name in enumerate(df.columns): ws.write(0, col, name, header_fmt)
-        
         ws.set_column(0, 0, 30, cell_fmt); ws.set_column(1, 1, 12, cell_fmt); ws.set_column(2, 2, 15, cell_fmt); ws.set_column(3, 3, 40, cell_fmt); ws.set_column(4, 10, 15, cell_fmt)
         img_cols = ["사진1", "사진2", "사진3"]
         base_col = len(df.columns)
         for i, c in enumerate(img_cols):
             ws.write(0, base_col + i, c, header_fmt)
             ws.set_column(base_col + i, base_col + i, 22, cell_fmt)
-
         for r in range(1, len(df) + 1): ws.set_row(r, 100)
-
         for idx, t in enumerate(tasks):
             photos = t.get("photos") or []
             if not isinstance(photos, list): photos = []
@@ -312,11 +230,9 @@ def export_excel(tasks: list[dict]) -> bytes:
                 if not img_path: continue
                 try:
                     with Image.open(img_path) as img: w, h = img.size
-                    target_w, target_h = 150, 130
-                    scale = min(target_w / w, target_h / h) * 0.9
+                    scale = min(150 / w, 130 / h) * 0.9
                     ws.insert_image(idx + 1, base_col + j, img_path, {"x_scale": scale, "y_scale": scale, "object_position": 1})
                 except: pass
-        
         sheet_sum = "요약"
         ws2 = wb.add_worksheet(sheet_sum)
         total = len(tasks)
@@ -350,19 +266,15 @@ tabs = st.tabs(["📊 대시보드", "📝 문제등록", "📅 계획수립", "
 # ---------------------------------------------------------
 with tabs[0]:
     raw_tasks = fetch_tasks_all()
-    
     if not raw_tasks:
         st.info("등록된 데이터가 없습니다.")
     else:
         df_all = pd.DataFrame(raw_tasks)
         df_all['issue_date'] = pd.to_datetime(df_all['issue_date'])
-        
-        # 파생 컬럼 생성
         df_all['Year'] = df_all['issue_date'].dt.year
         df_all['YYYY-MM'] = df_all['issue_date'].dt.strftime('%Y-%m')
         df_all['Week_Label'] = df_all['issue_date'].apply(lambda x: f"{x.year}-{x.isocalendar()[1]:02d}주차")
 
-        # 2. 필터 UI
         c1, c2 = st.columns([1, 4])
         with c1:
             period_mode = st.selectbox("기간 기준", ["월간", "주간", "연간", "기간지정"], index=0)
@@ -375,10 +287,8 @@ with tabs[0]:
                 all_months = sorted(df_all['YYYY-MM'].unique(), reverse=True)
                 this_month = datetime.now().strftime('%Y-%m')
                 default_m = [this_month] if this_month in all_months else (all_months[:1] if all_months else [])
-                
                 selected_months = st.multiselect("조회할 월 선택", all_months, default=default_m)
-                if selected_months:
-                    filtered_df = df_all[df_all['YYYY-MM'].isin(selected_months)]
+                if selected_months: filtered_df = df_all[df_all['YYYY-MM'].isin(selected_months)]
                 else: filtered_df = df_all.iloc[0:0]
 
             elif period_mode == "주간":
@@ -386,32 +296,24 @@ with tabs[0]:
                 this_year, this_week, _ = datetime.now().isocalendar()
                 this_week_label = f"{this_year}-{this_week:02d}주차"
                 default_w = [this_week_label] if this_week_label in all_weeks else (all_weeks[:1] if all_weeks else [])
-                
                 selected_weeks = st.multiselect("조회할 주차 선택", all_weeks, default=default_w)
-                if selected_weeks:
-                    filtered_df = df_all[df_all['Week_Label'].isin(selected_weeks)]
+                if selected_weeks: filtered_df = df_all[df_all['Week_Label'].isin(selected_weeks)]
                 else: filtered_df = df_all.iloc[0:0]
 
             elif period_mode == "연간":
                 all_years = sorted(df_all['Year'].unique(), reverse=True)
                 this_year = datetime.now().year
                 default_y = [this_year] if this_year in all_years else (all_years[:1] if all_years else [])
-                
                 selected_years = st.multiselect("조회할 연도 선택", all_years, default=default_y)
-                if selected_years:
-                    filtered_df = df_all[df_all['Year'].isin(selected_years)]
+                if selected_years: filtered_df = df_all[df_all['Year'].isin(selected_years)]
                 else: filtered_df = df_all.iloc[0:0]
 
-            else: # 기간지정
+            else: 
                 d_col1, d_col2 = st.columns(2)
                 start_d = d_col1.date_input("시작", value=today - timedelta(weeks=1))
                 end_d = d_col2.date_input("종료", value=today)
-                filtered_df = df_all[
-                    (df_all['issue_date'].dt.date >= start_d) & 
-                    (df_all['issue_date'].dt.date <= end_d)
-                ]
+                filtered_df = df_all[(df_all['issue_date'].dt.date >= start_d) & (df_all['issue_date'].dt.date <= end_d)]
 
-        # 3. 핵심 지표
         st.divider()
         total_cnt = len(filtered_df)
         done_cnt = len(filtered_df[filtered_df['status'] == '완료'])
@@ -423,62 +325,37 @@ with tabs[0]:
         m3.metric("완료율", f"{rate:.1f}%")
         with m4:
             if st.button("📥 엑셀 다운로드", type="primary", use_container_width=True):
-                tasks_to_export = filtered_df.to_dict('records')
-                with st.spinner("엑셀 생성 중..."):
-                    xbytes = export_excel(tasks_to_export)
-                    fname = f"HACCP_보고서_{datetime.now().strftime('%Y%m%d')}.xlsx"
-                    st.download_button("⬇️ 파일 받기", data=xbytes, file_name=fname, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                with st.spinner("생성 중..."):
+                    st.download_button("⬇️ 파일 받기", data=export_excel(filtered_df.to_dict('records')), file_name=f"HACCP_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # 4. 차트(장소별)와 표(장소별)
         st.divider()
         if total_cnt == 0:
-            st.warning("선택된 기간에 데이터가 없습니다.")
+            st.warning("데이터가 없습니다.")
         else:
             col_chart, col_table = st.columns([1, 1])
-            
-            # 장소별 집계 공통 사용
             filtered_df['공정/장소'] = filtered_df['location'].fillna("미분류").str.strip()
-            loc_stats = filtered_df.groupby('공정/장소').agg(
-                발생건수=('id', 'count'),
-                완료건수=('status', lambda x: (x == '완료').sum())
-            ).reset_index()
+            loc_stats = filtered_df.groupby('공정/장소').agg(발생건수=('id', 'count'), 완료건수=('status', lambda x: (x == '완료').sum())).reset_index()
             loc_stats['개선율'] = (loc_stats['완료건수'] / loc_stats['발생건수'] * 100).round(1)
             loc_stats = loc_stats.sort_values('발생건수', ascending=False)
 
             with col_chart:
-                # [그래프] 장소별 막대 그래프
-                st.markdown("##### 📊 장소별 발생/완료 현황")
+                st.markdown("##### 📊 장소별 현황")
                 c_data = loc_stats.melt('공정/장소', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
-                
                 chart = alt.Chart(c_data).mark_bar().encode(
                     x=alt.X('공정/장소:N', sort='-y', axis=alt.Axis(labelAngle=0), title=None),
                     y=alt.Y('건수:Q', title=None),
                     color=alt.Color('구분:N', scale=alt.Scale(domain=['발생건수', '완료건수'], range=['#FF9F36', '#2ECC71'])),
-                    xOffset='구분:N',
-                    tooltip=['공정/장소', '구분', '건수']
+                    xOffset='구분:N', tooltip=['공정/장소', '구분', '건수']
                 ).properties(height=300)
                 st.altair_chart(chart, use_container_width=True)
 
             with col_table:
-                # [표] 장소별 상세 집계
-                st.markdown("##### 📋 장소별 상세 집계")
-                display_table = loc_stats.rename(columns={'공정/장소': '장소'})
-                st.dataframe(
-                    display_table,
-                    column_config={
-                        "장소": st.column_config.TextColumn("장소"),
-                        "발생건수": st.column_config.NumberColumn("발생", format="%d"),
-                        "완료건수": st.column_config.NumberColumn("완료", format="%d"),
-                        "개선율": st.column_config.ProgressColumn("진행률", format="%.1f%%", min_value=0, max_value=100),
-                    },
-                    use_container_width=True,
-                    hide_index=True,
-                    height=300
-                )
+                st.markdown("##### 📋 상세 집계")
+                st.dataframe(loc_stats.rename(columns={'공정/장소': '장소'}), use_container_width=True, hide_index=True, height=300)
 
 
 # ---------------------------------------------------------
-# (B) 개선과제등록
+# (B) 문제 등록
 # ---------------------------------------------------------
 with tabs[1]:
     st.subheader("📝 문제 등록")
@@ -487,37 +364,34 @@ with tabs[1]:
         issue_date = c1.date_input("일시", value=date.today())
         location = c2.text_input("장소", placeholder="예: 포장실")
         reporter = c3.text_input("발견자", placeholder="예: 홍길동")
-        issue_text = st.text_area("내용", placeholder="문제점을 구체적으로 입력하세요", height=100)
-        photos = st.file_uploader("사진 (여러 장 가능)", type=["jpg", "png", "webp"], accept_multiple_files=True)
+        issue_text = st.text_area("내용", placeholder="내용 입력", height=100)
+        photos = st.file_uploader("사진", type=["jpg", "png", "webp"], accept_multiple_files=True)
         if st.form_submit_button("등록", type="primary"):
             if not (location and reporter and issue_text):
-                st.error("장소, 발견자, 내용은 필수입니다.")
+                st.error("필수 항목 누락")
             else:
                 try:
                     tid = insert_task(issue_date, location, issue_text, reporter)
                     if photos:
                         for f in photos: upload_photo(tid, f)
-                    st.success("저장되었습니다!")
+                    st.success("저장 완료!")
                 except Exception as e: st.error(f"오류: {e}")
 
+
 # ---------------------------------------------------------
-# (C) 개선계획수립
+# (C) 계획 수립
 # ---------------------------------------------------------
 with tabs[2]:
     st.subheader("📅 계획 수립")
     tasks = fetch_tasks_all()
     tasks = [t for t in tasks if t['status'] != '완료'] 
-    
-    if not tasks:
-        st.info("계획을 수립할 미완료 과제가 없습니다.")
+    if not tasks: st.info("대상 과제 없음")
     else:
         opts = [f"[{t['issue_date']}] {t['location']} - {t['issue_text'][:20]}..." for t in tasks]
         sel = st.selectbox("과제 선택", opts)
         t = tasks[opts.index(sel)]
-        
         st.info(f"내용: {t['issue_text']}")
         display_task_photos(t)
-        
         with st.form("form_plan"):
             c1, c2 = st.columns(2)
             assignee = c1.text_input("담당자", value=t.get('assignee') or "")
@@ -525,92 +399,74 @@ with tabs[2]:
             plan_text = st.text_area("계획내용", value=t.get('plan_text') or "")
             if st.form_submit_button("저장"):
                 update_task(t['id'], {"assignee": assignee, "plan_due": str(plan_due), "plan_text": plan_text})
-                st.success("저장 완료")
+                st.success("완료")
                 st.rerun()
 
+
 # ---------------------------------------------------------
-# (D) 조치 결과 입력 (기능 강화됨)
+# (D) 조치 결과 입력 (기능 강화: 필터/미지정/사진추가)
 # ---------------------------------------------------------
 with tabs[3]:
     st.subheader("🛠️ 조치 결과 입력")
     
-    # 1. 모든 과제 로드 (완료된 건은 제외)
     all_tasks = fetch_tasks_all()
+    # 완료되지 않은 과제만 기본 대상
     target_tasks = [t for t in all_tasks if t['status'] != '완료']
 
     if not target_tasks:
         st.info("조치할 미완료 과제가 없습니다.")
+        if st.button("새로고침"): clear_cache(); st.rerun()
     else:
-        # --- [신규 기능] 담당자/장소 필터 추가 ---
+        # 필터링 UI
         assignees = sorted(list(set([t.get('assignee') or "미지정" for t in target_tasks])))
         locations = sorted(list(set([t.get('location') or "미분류" for t in target_tasks])))
         
         c_filter1, c_filter2 = st.columns(2)
-        with c_filter1:
-            sel_assignee = st.selectbox("👤 담당자 필터", ["전체"] + assignees)
-        with c_filter2:
-            sel_location = st.selectbox("🏢 장소 필터", ["전체"] + locations)
+        sel_assignee = c_filter1.selectbox("👤 담당자 필터", ["전체"] + assignees)
+        sel_location = c_filter2.selectbox("🏢 장소 필터", ["전체"] + locations)
             
-        # 필터 적용
         filtered_tasks = target_tasks
         if sel_assignee != "전체":
-            if sel_assignee == "미지정":
-                filtered_tasks = [t for t in filtered_tasks if not t.get('assignee')]
-            else:
-                filtered_tasks = [t for t in filtered_tasks if t.get('assignee') == sel_assignee]
-                
+            if sel_assignee == "미지정": filtered_tasks = [t for t in filtered_tasks if not t.get('assignee')]
+            else: filtered_tasks = [t for t in filtered_tasks if t.get('assignee') == sel_assignee]
         if sel_location != "전체":
              filtered_tasks = [t for t in filtered_tasks if (t.get('location') or "미분류") == sel_location]
 
-        # --- 과제 선택 ---
         if not filtered_tasks:
             st.warning("조건에 맞는 과제가 없습니다.")
         else:
-            # 딕셔너리로 매핑 (ID로 찾기 위해)
             task_map = {f"[{t['issue_date']}] {t['location']} ({t.get('assignee') or '미지정'}) - {t['issue_text'][:20]}...": t for t in filtered_tasks}
-            sel_label = st.selectbox("대상 과제 선택", list(task_map.keys()), key="act_task_sel")
+            sel_label = st.selectbox("대상 과제 선택", list(task_map.keys()))
             t = task_map[sel_label]
             
             st.divider()
             st.info(f"📌 내용: {t['issue_text']}")
             
-            # --- [복구 기능] 사진 추가 및 확인 ---
-            st.markdown("##### 📸 조치 전/후 사진 관리")
+            # [기능 강화] 사진 추가/관리
             display_task_photos(t)
-            
-            # 바로 사진을 올릴 수 있는 Expander 추가
-            with st.expander("➕ 사진 추가 등록 (조치 사진 등)"):
+            with st.expander("➕ 사진 추가 (조치 사진 등)"):
                 act_photos = st.file_uploader("사진 업로드", type=["jpg", "png", "webp"], accept_multiple_files=True, key=f"act_up_{t['id']}")
                 if act_photos and st.button("사진 저장", key=f"btn_act_{t['id']}"):
-                    for f in act_photos:
-                        upload_photo(t['id'], f)
-                    st.success("사진이 등록되었습니다.")
+                    for f in act_photos: upload_photo(t['id'], f)
+                    st.success("등록됨")
                     st.rerun()
             
             st.divider()
-
-            # --- 조치 완료 폼 ---
             with st.form("form_act"):
-                st.markdown("##### 📝 조치 결과 입력")
-                action_text = st.text_area("조치내용", value=t.get('action_text') or "", height=100)
+                action_text = st.text_area("조치내용", value=t.get('action_text') or "")
                 action_done_date = st.date_input("완료일", value=pd.to_datetime(t.get('action_done_date')).date() if t.get('action_done_date') else date.today())
-                
-                if st.form_submit_button("✅ 조치 완료 처리", type="primary"):
-                    update_task(t['id'], {
-                        "action_text": action_text,
-                        "action_done_date": str(action_done_date),
-                        "status": "완료"
-                    })
+                if st.form_submit_button("조치 완료 처리", type="primary"):
+                    update_task(t['id'], {"action_text": action_text, "action_done_date": str(action_done_date), "status": "완료"})
                     st.balloons()
-                    st.success("조치 완료되었습니다! (목록에서 사라집니다)")
+                    st.success("완료 처리되었습니다.")
                     st.rerun()
 
+
 # ---------------------------------------------------------
-# (E) 조회/관리
+# (E) 통합 조회 및 관리
 # ---------------------------------------------------------
 with tabs[4]:
     st.subheader("🔍 통합 조회 및 관리")
-    
     c1, c2, c3 = st.columns([1, 1, 2])
     status_filter = c1.selectbox("상태", ["전체", "진행중", "완료"])
     loc_filter = c2.text_input("장소 검색")
@@ -625,58 +481,40 @@ with tabs[4]:
         filtered.append(t)
         
     if not filtered:
-        st.warning("조건에 맞는 데이터가 없습니다.")
+        st.warning("데이터가 없습니다.")
     else:
-        # [NEW] 리스트 표시 (선택 가능하게 설정)
         df_list = pd.DataFrame(filtered)
-        display_cols = ['issue_date', 'location', 'issue_text', 'status', 'action_done_date']
-        df_display = df_list[display_cols].copy()
-        df_display.columns = ['일시', '장소', '내용', '상태', '완료일']
+        df_disp = df_list[['issue_date', 'location', 'issue_text', 'status', 'action_done_date']].copy()
+        df_disp.columns = ['일시', '장소', '내용', '상태', '완료일']
         
-        st.markdown("👇 **목록에서 과제를 클릭하면 아래에 상세 내용이 나옵니다.**")
-        
-        selection = st.dataframe(
-            df_display, 
-            use_container_width=True, 
-            hide_index=True, 
-            height=250,
-            on_select="rerun",
-            selection_mode="single-row"
-        )
+        st.caption("목록을 클릭하면 상세 내용을 볼 수 있습니다.")
+        selection = st.dataframe(df_disp, use_container_width=True, hide_index=True, height=250, on_select="rerun", selection_mode="single-row")
         
         if selection.selection.rows:
-            selected_index = selection.selection.rows[0]
-            target = filtered[selected_index]
-            
+            target = filtered[selection.selection.rows[0]]
             st.divider()
-            st.markdown(f"#### 🔧 선택된 과제 관리 : {target['location']} - {target['issue_text']}")
-            
-            c_left, c_right = st.columns([3, 1])
-            with c_left:
-                st.info(f"발견자: {target['reporter']} | 담당자: {target.get('assignee') or '-'} | 완료일: {target.get('action_done_date') or '-'}")
-                
-            with c_right:
-                if st.button("🗑️ 이 과제 삭제하기", type="primary"):
-                    delete_task_entirely(target['id'], target.get('photos'))
-                    st.success("삭제됨")
-                    st.rerun()
+            st.markdown(f"#### 🔧 상세 관리 : {target['location']}")
+            c_l, c_r = st.columns([3, 1])
+            c_l.info(f"내용: {target['issue_text']} | 담당: {target.get('assignee') or '-'} | 완료: {target.get('action_done_date') or '-'}")
+            if c_r.button("🗑️ 삭제하기", type="primary"):
+                delete_task_entirely(target['id'], target.get('photos'))
+                st.success("삭제됨")
+                st.rerun()
 
-            st.markdown("##### 📸 사진 관리 (발굴 및 조치 사진)")
-            current_photos = display_task_photos(target)
+            display_task_photos(target)
             
-            if current_photos:
-                with st.expander("🗑 사진 삭제 모드 (클릭해서 펼치기)"):
+            # 사진 삭제
+            if target.get('photos'):
+                with st.expander("사진 삭제 모드"):
                     cols = st.columns(4)
-                    for i, p in enumerate(current_photos):
+                    for i, p in enumerate(target['photos']):
                         with cols[i%4]:
                             st.image(p['public_url'], width=100)
-                            if st.button("삭제", key=f"del_{p['photo_id']}"):
-                                delete_photo(p['photo_id'], p['storage_path'])
-                                st.rerun()
-                                
-            st.markdown("##### 📤 사진 추가 등록 (조치 후 사진 등)")
-            new_photos = st.file_uploader("", accept_multiple_files=True, key="add_new_p")
-            if new_photos and st.button("사진 업로드"):
-                for f in new_photos: upload_photo(target['id'], f)
-                st.success("업로드 완료")
+                            if st.button("삭제", key=f"del_{p['photo_id']}"): delete_photo(p['photo_id'], p['storage_path']); st.rerun()
+            
+            # 사진 추가
+            new_p = st.file_uploader("사진 추가", accept_multiple_files=True, key="add_p_man")
+            if new_p and st.button("업로드"):
+                for f in new_p: upload_photo(target['id'], f)
+                st.success("완료")
                 st.rerun()
