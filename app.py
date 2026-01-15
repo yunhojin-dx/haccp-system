@@ -78,7 +78,7 @@ sb = get_supabase()
 
 
 # =========================================================
-# 2) 핵심 로직 (캐싱 + 사진 구분 로직 추가)
+# 2) 핵심 로직
 # =========================================================
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_tasks_all() -> list[dict]:
@@ -91,7 +91,6 @@ def fetch_tasks_all() -> list[dict]:
         res_p = sb.table("haccp_task_photos").select("*").in_("task_id", t_ids).execute()
         photos = res_p.data or []
         
-        # [수정] 사진을 BEFORE(개선전)와 AFTER(개선후)로 분류하여 매핑
         photo_map_before = {}
         photo_map_after = {}
         
@@ -99,20 +98,17 @@ def fetch_tasks_all() -> list[dict]:
             tid = p["task_id"]
             if "id" in p and "photo_id" not in p: p["photo_id"] = p["id"]
             
-            # 파일 경로에 'AFTER_'가 포함되어 있으면 개선후 사진으로 분류
             path = p.get('storage_path', '')
             if '/AFTER_' in path:
                 if tid not in photo_map_after: photo_map_after[tid] = []
                 photo_map_after[tid].append(p)
             else:
-                # 그 외에는 모두 개선전(BEFORE) 사진으로 간주
                 if tid not in photo_map_before: photo_map_before[tid] = []
                 photo_map_before[tid].append(p)
             
         for t in tasks:
             t["photos_before"] = photo_map_before.get(t["id"], [])
             t["photos_after"] = photo_map_after.get(t["id"], [])
-            # 호환성을 위해 전체 리스트도 유지
             t["photos"] = t["photos_before"] + t["photos_after"]
             
         return tasks
@@ -142,25 +138,32 @@ def delete_task_entirely(task_id: str, photos: list):
     sb.table("haccp_tasks").delete().eq("id", task_id).execute()
     clear_cache()
 
-def compress_image(file_bytes: bytes, max_w=1280, quality=80) -> tuple[bytes, str]:
+# [중요] 압축 로직 최적화 (1024px, Quality 70)
+def compress_image(file_bytes: bytes, max_w=1024, quality=70) -> tuple[bytes, str]:
     img = Image.open(io.BytesIO(file_bytes))
-    img = img.convert("RGB")
+    
+    # PNG 등의 투명도(RGBA)를 흰색 배경 RGB로 변환 (JPG 저장 위함)
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+    
     w, h = img.size
     if w > max_w:
         new_h = int(h * (max_w / w))
-        img = img.resize((max_w, new_h))
+        img = img.resize((max_w, new_h), Image.Resampling.LANCZOS)
+
     out = io.BytesIO()
+    # 무조건 JPG로 변환하여 저장 (용량 최적화)
     img.save(out, format="JPEG", quality=quality, optimize=True)
     return out.getvalue(), "jpg"
 
 def make_public_url(bucket: str, path: str) -> str:
     return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
 
-# [수정] 업로드 시 type(BEFORE/AFTER)을 받아서 파일명에 기록
 def upload_photo(task_id: str, uploaded_file, photo_type="BEFORE") -> dict:
     raw = uploaded_file.read()
-    compressed, ext = compress_image(raw, max_w=1400, quality=82)
-    # 파일명에 타입(BEFORE/AFTER)을 명시
+    # 압축 실행
+    compressed, ext = compress_image(raw, max_w=1024, quality=70)
+    
     filename = f"{photo_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
     key = f"{task_id}/{filename}"
     
@@ -187,7 +190,6 @@ def download_image_to_temp(url: str) -> str | None:
         return path
     except: return None
 
-# [수정] 엑셀 출력 시 Before/After 컬럼 분리
 def export_excel(tasks: list[dict]) -> bytes:
     rows = []
     for t in tasks:
@@ -218,7 +220,7 @@ def export_excel(tasks: list[dict]) -> bytes:
         
         ws.set_column(0, 0, 30, cell_fmt); ws.set_column(1, 1, 12, cell_fmt); ws.set_column(2, 2, 15, cell_fmt); ws.set_column(3, 3, 40, cell_fmt); ws.set_column(4, 10, 15, cell_fmt)
         
-        # [수정] 사진 컬럼 분리 (개선전 2개, 개선후 2개)
+        # [수정] 엑셀 헤더 분리
         base_col = len(df.columns)
         photo_headers = ["개선전_사진1", "개선전_사진2", "개선후_사진1", "개선후_사진2"]
         for i, ph in enumerate(photo_headers):
@@ -228,12 +230,10 @@ def export_excel(tasks: list[dict]) -> bytes:
         for r in range(1, len(df) + 1): ws.set_row(r, 100)
 
         for idx, t in enumerate(tasks):
-            # 개선전/후 사진 분리 가져오기
-            befores = t.get("photos_before", [])[:2] # 최대 2장
-            afters = t.get("photos_after", [])[:2]   # 최대 2장
+            befores = t.get("photos_before", [])[:2]
+            afters = t.get("photos_after", [])[:2]
             
-            # 엑셀 삽입용 리스트 (전1, 전2, 후1, 후2 순서)
-            # 빈 자리는 None으로 채워서 인덱스 맞춤
+            # [전1, 전2, 후1, 후2] 순서로 배치
             export_photos = befores + [None]*(2-len(befores)) + afters + [None]*(2-len(afters))
 
             for j, p in enumerate(export_photos):
@@ -257,7 +257,6 @@ def export_excel(tasks: list[dict]) -> bytes:
         ws2.write(4, 0, "완료율(%)"); ws2.write(4, 1, round(rate, 1))
     return out.getvalue()
 
-# [수정] 사진 표시 함수 분리 (Before / After 따로 출력 가능하게)
 def display_photos_grid(photos, title=None):
     if title: st.markdown(f"**{title}**")
     if not photos:
@@ -328,9 +327,6 @@ with tabs[0]: # 대시보드
         with m4:
             if st.button("📥 엑셀 다운로드", type="primary", use_container_width=True):
                 with st.spinner("생성 중..."):
-                    # to_dict 시에 사진 정보도 포함되도록 원본 리스트에서 매칭해야 함 (df 변환 시 누락 방지)
-                    # 여기서는 간단히 df -> dict 후 사진 정보는 fetch_tasks_all의 구조를 따르므로 괜찮음
-                    # 하지만 filtered_df는 사진 필드가 object라 잘 살아있음.
                     st.download_button("⬇️ 파일 받기", data=export_excel(filtered_df.to_dict('records')), file_name=f"HACCP_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         st.divider()
@@ -365,7 +361,6 @@ with tabs[1]: # 문제 등록
         location = c2.text_input("장소", placeholder="예: 포장실")
         reporter = c3.text_input("발견자", placeholder="예: 홍길동")
         issue_text = st.text_area("내용", placeholder="내용 입력", height=100)
-        # [수정] 여기서 올리는 사진은 기본값(BEFORE)으로 저장됨
         photos = st.file_uploader("사진 (개선 전)", type=["jpg", "png", "webp"], accept_multiple_files=True)
         if st.form_submit_button("등록", type="primary"):
             if not (location and reporter and issue_text):
@@ -432,13 +427,11 @@ with tabs[3]: # 조치 입력
             st.divider()
             st.info(f"📌 내용: {t['issue_text']}")
             
-            # [수정] 사진 분리 표시
             c_p1, c_p2 = st.columns(2)
             with c_p1: display_photos_grid(t.get('photos_before', []), "🔴 개선 전")
             with c_p2: display_photos_grid(t.get('photos_after', []), "🟢 개선 후 (현재)")
 
             with st.expander("➕ 개선 완료(After) 사진 추가"):
-                # [수정] 여기서 올리면 photo_type="AFTER"로 저장
                 act_photos = st.file_uploader("사진 업로드", type=["jpg", "png", "webp"], accept_multiple_files=True, key=f"act_up_{t['id']}")
                 if act_photos and st.button("사진 저장", key=f"btn_act_{t['id']}"):
                     for f in act_photos: upload_photo(t['id'], f, photo_type="AFTER")
@@ -490,23 +483,19 @@ with tabs[4]: # 조회/관리
                 st.success("삭제됨")
                 st.rerun()
 
-            # [수정] 조회 시에도 분리해서 보여줌
             display_photos_grid(target.get('photos_before', []), "🔴 개선 전")
             display_photos_grid(target.get('photos_after', []), "🟢 개선 후")
             
-            # 사진 삭제 (통합 리스트로 관리)
             all_p = target.get('photos', [])
             if all_p:
                 with st.expander("사진 삭제 모드"):
                     cols = st.columns(4)
                     for i, p in enumerate(all_p):
                         with cols[i%4]:
-                            # 어떤 타입인지 표시
                             ptype = "🟢후" if "/AFTER_" in p.get('storage_path', '') else "🔴전"
                             st.image(p['public_url'], caption=ptype, width=100)
                             if st.button("삭제", key=f"del_{p['photo_id']}"): delete_photo(p['photo_id'], p['storage_path']); st.rerun()
             
-            # 사진 추가 (타입 선택 가능하게)
             c_add1, c_add2 = st.columns([1, 3])
             add_type = c_add1.radio("추가할 사진 타입", ["개선전(BEFORE)", "개선후(AFTER)"], horizontal=True)
             new_p = c_add2.file_uploader("사진 추가", accept_multiple_files=True, key="add_p_man")
