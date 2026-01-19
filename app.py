@@ -38,18 +38,7 @@ st.markdown("""
     div[data-testid="stTabs"] button[data-testid="stTab"] { background-color: #f8f9fa; color: #495057; border: 1px solid #dee2e6; border-bottom: none; border-radius: 10px 10px 0 0; padding: 1rem 2rem; font-weight: 700; margin-right: 4px; }
     div[data-testid="stTabs"] button[data-testid="stTab"][aria-selected="true"] { background-color: #ffffff; color: #e03131; border-top: 3px solid #e03131; border-bottom: 2px solid #ffffff; margin-bottom: -2px; z-index: 10; }
     div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] { border-top: 2px solid #dee2e6; margin-top: -2px; }
-    
-    /* 등급 뱃지 스타일 */
-    .grade-badge {
-        display: inline-block;
-        padding: 0.2rem 0.6rem;
-        border-radius: 4px;
-        font-weight: bold;
-        font-size: 0.9rem;
-        color: white;
-        background-color: #adb5bd;
-        margin-right: 0.5rem;
-    }
+    .grade-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; font-size: 0.9rem; color: white; background-color: #adb5bd; margin-right: 0.5rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -273,7 +262,6 @@ def display_photos_grid(photos, title=None):
     for i, p in enumerate(photos):
         with cols[i % 4]: st.image(p.get("public_url"), use_container_width=True)
 
-# 등급 리스트
 GRADE_OPTIONS = ["C등급", "B등급", "A등급", "공장장", "본부장", "대표이사"]
 
 # =========================================================
@@ -361,22 +349,52 @@ with tabs[0]: # 대시보드
                 st.altair_chart(chart, use_container_width=True)
 
             with col_table:
-                st.markdown("##### 📋 상세 집계")
+                st.markdown("##### 📋 장소별 상세 집계")
                 st.dataframe(loc_stats.rename(columns={'공정/장소': '장소'}), use_container_width=True, hide_index=True, height=300)
 
+            # [수정] 등급별 섹션 (그래프 + 표 분할 배치)
             st.divider()
-            st.markdown("##### 📊 등급별 발생/완료 현황")
-            grade_stats = filtered_df.groupby('grade').agg(발생건수=('id', 'count'), 완료건수=('status', lambda x: (x == '완료').sum())).reset_index()
-            sort_order = ["C등급", "B등급", "A등급", "공장장", "본부장", "대표이사", "미지정"]
             
-            g_data = grade_stats.melt('grade', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
-            chart_g = alt.Chart(g_data).mark_bar().encode(
-                x=alt.X('grade:N', sort=sort_order, title="등급", axis=alt.Axis(labelAngle=0)),
-                y=alt.Y('건수:Q', title=None),
-                color=alt.Color('구분:N', scale=alt.Scale(domain=['발생건수', '완료건수'], range=['#FF9F36', '#2ECC71'])),
-                xOffset='구분:N', tooltip=['grade', '구분', '건수']
-            ).properties(height=300)
-            st.altair_chart(chart_g, use_container_width=True)
+            # 등급별 데이터 집계
+            grade_stats = filtered_df.groupby('grade').agg(
+                발생건수=('id', 'count'), 
+                완료건수=('status', lambda x: (x == '완료').sum())
+            ).reset_index()
+            grade_stats['개선율'] = (grade_stats['완료건수'] / grade_stats['발생건수'] * 100).round(1)
+            
+            # 등급 정렬을 위한 로직
+            sort_order = ["C등급", "B등급", "A등급", "공장장", "본부장", "대표이사", "미지정"]
+            # 데이터프레임을 정렬 순서대로 정리
+            grade_stats['grade'] = pd.Categorical(grade_stats['grade'], categories=sort_order, ordered=True)
+            grade_stats = grade_stats.sort_values('grade')
+
+            c_g_chart, c_g_table = st.columns([1, 1])
+            
+            with c_g_chart:
+                st.markdown("##### 📊 등급별 발생/완료 현황")
+                g_data = grade_stats.melt('grade', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
+                chart_g = alt.Chart(g_data).mark_bar().encode(
+                    x=alt.X('grade:N', sort=sort_order, title="등급", axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y('건수:Q', title=None),
+                    color=alt.Color('구분:N', scale=alt.Scale(domain=['발생건수', '완료건수'], range=['#FF9F36', '#2ECC71'])),
+                    xOffset='구분:N', tooltip=['grade', '구분', '건수']
+                ).properties(height=300)
+                st.altair_chart(chart_g, use_container_width=True)
+                
+            with c_g_table:
+                st.markdown("##### 📋 등급별 상세 집계")
+                st.dataframe(
+                    grade_stats.rename(columns={'grade': '등급'}),
+                    column_config={
+                        "등급": st.column_config.TextColumn("등급"),
+                        "발생건수": st.column_config.NumberColumn("발생", format="%d"),
+                        "완료건수": st.column_config.NumberColumn("완료", format="%d"),
+                        "개선율": st.column_config.ProgressColumn("진행률", format="%.1f%%", min_value=0, max_value=100),
+                    },
+                    use_container_width=True,
+                    hide_index=True,
+                    height=300
+                )
 
 
 with tabs[1]: # 문제 등록
@@ -530,7 +548,6 @@ with tabs[4]: # 조회/관리
                 st.success("삭제됨")
                 st.rerun()
 
-            # [추가] 등급 수정 기능
             with st.expander("🏷️ 등급 수정 (미지정 건 처리용)"):
                 current_grade = target.get('grade') or "미지정"
                 idx = GRADE_OPTIONS.index(current_grade) if current_grade in GRADE_OPTIONS else 0
