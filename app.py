@@ -38,6 +38,18 @@ st.markdown("""
     div[data-testid="stTabs"] button[data-testid="stTab"] { background-color: #f8f9fa; color: #495057; border: 1px solid #dee2e6; border-bottom: none; border-radius: 10px 10px 0 0; padding: 1rem 2rem; font-weight: 700; margin-right: 4px; }
     div[data-testid="stTabs"] button[data-testid="stTab"][aria-selected="true"] { background-color: #ffffff; color: #e03131; border-top: 3px solid #e03131; border-bottom: 2px solid #ffffff; margin-bottom: -2px; z-index: 10; }
     div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] { border-top: 2px solid #dee2e6; margin-top: -2px; }
+    
+    /* 등급 뱃지 스타일 */
+    .grade-badge {
+        display: inline-block;
+        padding: 0.2rem 0.6rem;
+        border-radius: 4px;
+        font-weight: bold;
+        font-size: 0.9rem;
+        color: white;
+        background-color: #adb5bd;
+        margin-right: 0.5rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -119,8 +131,16 @@ def fetch_tasks_all() -> list[dict]:
 def clear_cache():
     fetch_tasks_all.clear()
 
-def insert_task(issue_date, location, issue_text, reporter):
-    row = {"issue_date": str(issue_date), "location": location.strip(), "issue_text": issue_text.strip(), "reporter": reporter.strip(), "status": "진행중"}
+# [수정] 등급(grade) 추가
+def insert_task(issue_date, location, issue_text, reporter, grade):
+    row = {
+        "issue_date": str(issue_date), 
+        "location": location.strip(), 
+        "issue_text": issue_text.strip(), 
+        "reporter": reporter.strip(), 
+        "grade": grade, # 등급 추가
+        "status": "진행중"
+    }
     res = sb.table("haccp_tasks").insert(row).execute()
     clear_cache()
     return res.data[0]["id"]
@@ -181,6 +201,7 @@ def download_image_to_temp(url: str) -> str | None:
         return path
     except: return None
 
+# [수정] 엑셀에 등급 추가
 def export_excel(tasks: list[dict]) -> bytes:
     rows = []
     for t in tasks:
@@ -188,6 +209,7 @@ def export_excel(tasks: list[dict]) -> bytes:
             "ID": t.get("legacy_id") or t["id"],
             "일시": t.get("issue_date"),
             "공정/장소": t.get("location"),
+            "등급": t.get("grade"), # 등급 컬럼 추가
             "개선 필요사항": t.get("issue_text"),
             "발견자": t.get("reporter"),
             "진행상태": t.get("status"),
@@ -207,7 +229,14 @@ def export_excel(tasks: list[dict]) -> bytes:
         header_fmt = wb.add_format({"bold": True, "bg_color": "#EFEFEF", "border": 1, "align": "center", "valign": "vcenter"})
         cell_fmt = wb.add_format({"align": "center", "valign": "vcenter", "text_wrap": True, "border": 1})
         for col, name in enumerate(df.columns): ws.write(0, col, name, header_fmt)
-        ws.set_column(0, 0, 30, cell_fmt); ws.set_column(1, 1, 12, cell_fmt); ws.set_column(2, 2, 15, cell_fmt); ws.set_column(3, 3, 40, cell_fmt); ws.set_column(4, 10, 15, cell_fmt)
+        
+        # 컬럼 너비 조정 (등급 포함)
+        ws.set_column(0, 0, 30, cell_fmt)
+        ws.set_column(1, 2, 15, cell_fmt)
+        ws.set_column(3, 3, 10, cell_fmt) # 등급 컬럼
+        ws.set_column(4, 4, 40, cell_fmt) # 내용
+        ws.set_column(5, 11, 15, cell_fmt)
+        
         base_col = len(df.columns)
         photo_headers = ["개선전_사진1", "개선전_사진2", "개선후_사진1", "개선후_사진2"]
         for i, ph in enumerate(photo_headers):
@@ -247,6 +276,8 @@ def display_photos_grid(photos, title=None):
     for i, p in enumerate(photos):
         with cols[i % 4]: st.image(p.get("public_url"), use_container_width=True)
 
+# 등급 리스트 정의
+GRADE_OPTIONS = ["C등급", "B등급", "A등급", "공장장", "본부장", "대표이사"]
 
 # =========================================================
 # 7) 메인 화면: 탭 구성
@@ -263,6 +294,9 @@ with tabs[0]: # 대시보드
         df_all['Year'] = df_all['issue_date'].dt.year
         df_all['YYYY-MM'] = df_all['issue_date'].dt.strftime('%Y-%m')
         df_all['Week_Label'] = df_all['issue_date'].apply(lambda x: f"{x.year}-{x.isocalendar()[1]:02d}주차")
+        # 등급 없는 데이터 처리
+        if 'grade' not in df_all.columns: df_all['grade'] = "미지정"
+        df_all['grade'] = df_all['grade'].fillna("미지정")
 
         c1, c2 = st.columns([1, 4])
         with c1: period_mode = st.selectbox("기간 기준", ["월간", "주간", "연간", "기간지정"], index=0)
@@ -331,16 +365,37 @@ with tabs[0]: # 대시보드
                 st.altair_chart(chart, use_container_width=True)
 
             with col_table:
-                st.markdown("##### 📋 상세 집계")
+                st.markdown("##### 📋 장소별 상세 집계")
                 st.dataframe(loc_stats.rename(columns={'공정/장소': '장소'}), use_container_width=True, hide_index=True, height=300)
+
+            # [추가] 등급별 현황 그래프 (아래쪽 배치)
+            st.divider()
+            st.markdown("##### 📊 등급별 발생/완료 현황")
+            grade_stats = filtered_df.groupby('grade').agg(발생건수=('id', 'count'), 완료건수=('status', lambda x: (x == '완료').sum())).reset_index()
+            
+            # 정렬 순서 정의 (C -> 대표이사 순)
+            sort_order = ["C등급", "B등급", "A등급", "공장장", "본부장", "대표이사", "미지정"]
+            
+            g_data = grade_stats.melt('grade', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
+            chart_g = alt.Chart(g_data).mark_bar().encode(
+                x=alt.X('grade:N', sort=sort_order, title="등급", axis=alt.Axis(labelAngle=0)),
+                y=alt.Y('건수:Q', title=None),
+                color=alt.Color('구분:N', scale=alt.Scale(domain=['발생건수', '완료건수'], range=['#FF9F36', '#2ECC71'])),
+                xOffset='구분:N', tooltip=['grade', '구분', '건수']
+            ).properties(height=300)
+            st.altair_chart(chart_g, use_container_width=True)
+
 
 with tabs[1]: # 문제 등록
     st.subheader("📝 문제 등록")
     with st.form("form_register", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         issue_date = c1.date_input("일시", value=date.today())
         location = c2.text_input("장소", placeholder="예: 포장실")
         reporter = c3.text_input("발견자", placeholder="예: 홍길동")
+        # [추가] 등급 선택 박스
+        grade = c4.selectbox("관리 등급", GRADE_OPTIONS)
+        
         issue_text = st.text_area("내용", placeholder="내용 입력", height=100)
         photos = st.file_uploader("사진 (개선 전)", type=["jpg", "png", "webp"], accept_multiple_files=True)
         if st.form_submit_button("등록", type="primary"):
@@ -348,7 +403,8 @@ with tabs[1]: # 문제 등록
                 st.error("필수 항목 누락")
             else:
                 try:
-                    tid = insert_task(issue_date, location, issue_text, reporter)
+                    # insert_task에 grade 전달
+                    tid = insert_task(issue_date, location, issue_text, reporter, grade)
                     if photos:
                         for f in photos: upload_photo(tid, f, photo_type="BEFORE")
                     st.success("저장 완료!")
@@ -360,21 +416,35 @@ with tabs[2]: # 계획 수립
     tasks = [t for t in tasks if t['status'] != '완료'] 
     if not tasks: st.info("대상 과제 없음")
     else:
-        opts = [f"[{t['issue_date']}] {t['location']} - {t['issue_text'][:20]}..." for t in tasks]
+        # 옵션에 등급 표시
+        opts = [f"[{t.get('grade') or '-'}] {t['issue_date']} | {t['location']} - {t['issue_text'][:15]}..." for t in tasks]
         sel = st.selectbox("과제 선택", opts)
         t = tasks[opts.index(sel)]
+        
+        # 상세 정보에 등급 뱃지 표시
+        st.markdown(f"### <span class='grade-badge'>{t.get('grade') or '미지정'}</span> {t['location']}", unsafe_allow_html=True)
         st.info(f"내용: {t['issue_text']}")
         display_photos_grid(t.get('photos_before', []), "📸 개선 전 사진")
         
         with st.form("form_plan"):
             st.markdown("**✏️ 내용 수정**")
             new_issue_text = st.text_area("개선 필요사항 (내용 수정 가능)", value=t['issue_text'], height=100)
-            c1, c2 = st.columns(2)
+            
+            c1, c2, c3 = st.columns(3)
             assignee = c1.text_input("담당자", value=t.get('assignee') or "")
             plan_due = c2.date_input("계획일정", value=pd.to_datetime(t.get('plan_due')).date() if t.get('plan_due') else date.today())
+            # [추가] 등급 수정 가능하게
+            new_grade = c3.selectbox("등급 수정", GRADE_OPTIONS, index=GRADE_OPTIONS.index(t.get('grade')) if t.get('grade') in GRADE_OPTIONS else 0)
+            
             plan_text = st.text_area("계획내용", value=t.get('plan_text') or "")
             if st.form_submit_button("저장"):
-                update_task(t['id'], {"issue_text": new_issue_text, "assignee": assignee, "plan_due": str(plan_due), "plan_text": plan_text})
+                update_task(t['id'], {
+                    "issue_text": new_issue_text, 
+                    "assignee": assignee, 
+                    "plan_due": str(plan_due), 
+                    "plan_text": plan_text,
+                    "grade": new_grade
+                })
                 st.success("완료")
                 st.rerun()
 
@@ -403,19 +473,17 @@ with tabs[3]: # 조치 입력
 
         if not filtered_tasks: st.warning("조건에 맞는 과제가 없습니다.")
         else:
-            task_map = {f"[{t['issue_date']}] {t['location']} ({t.get('assignee') or '미지정'}) - {t['issue_text'][:20]}...": t for t in filtered_tasks}
+            task_map = {f"[{t.get('grade') or '-'}] {t['issue_date']} {t['location']} - {t['issue_text'][:15]}...": t for t in filtered_tasks}
             sel_label = st.selectbox("대상 과제 선택", list(task_map.keys()))
             t = task_map[sel_label]
             
             st.divider()
+            st.markdown(f"### <span class='grade-badge'>{t.get('grade') or '미지정'}</span> {t['location']}", unsafe_allow_html=True)
             st.info(f"📌 문제 내용: {t['issue_text']}")
             
-            # [추가] 계획 내용 표시 (문제 내용과 사진 사이)
             plan_txt = t.get('plan_text')
-            if plan_txt:
-                st.success(f"📅 계획 내용: {plan_txt}")
-            else:
-                st.warning("📅 계획 내용: 수립된 계획이 없습니다.")
+            if plan_txt: st.success(f"📅 계획 내용: {plan_txt}")
+            else: st.warning("📅 계획 내용: 수립된 계획이 없습니다.")
             
             c_p1, c_p2 = st.columns(2)
             with c_p1: display_photos_grid(t.get('photos_before', []), "🔴 개선 전")
@@ -456,8 +524,9 @@ with tabs[4]: # 조회/관리
     if not filtered: st.warning("데이터가 없습니다.")
     else:
         df_list = pd.DataFrame(filtered)
-        df_disp = df_list[['issue_date', 'location', 'issue_text', 'status', 'action_done_date']].copy()
-        df_disp.columns = ['일시', '장소', '내용', '상태', '완료일']
+        # 등급 컬럼 표시
+        df_disp = df_list[['issue_date', 'grade', 'location', 'issue_text', 'status', 'action_done_date']].copy()
+        df_disp.columns = ['일시', '등급', '장소', '내용', '상태', '완료일']
         
         st.caption("목록을 클릭하면 상세 내용을 볼 수 있습니다.")
         selection = st.dataframe(df_disp, use_container_width=True, hide_index=True, height=250, on_select="rerun", selection_mode="single-row")
@@ -465,7 +534,8 @@ with tabs[4]: # 조회/관리
         if selection.selection.rows:
             target = filtered[selection.selection.rows[0]]
             st.divider()
-            st.markdown(f"#### 🔧 상세 관리 : {target['location']}")
+            st.markdown(f"#### 🔧 상세 관리 : <span class='grade-badge'>{target.get('grade') or '-'}</span> {target['location']}", unsafe_allow_html=True)
+            
             c_l, c_r = st.columns([3, 1])
             c_l.info(f"내용: {target['issue_text']} | 담당: {target.get('assignee') or '-'} | 완료: {target.get('action_done_date') or '-'}")
             if c_r.button("🗑️ 삭제하기", type="primary"):
