@@ -2,8 +2,16 @@ name: 천안공장 온도 자동수집 (10분 간격)
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # 10분마다 실행
-  workflow_dispatch:        # 수동 실행 버튼
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+# ▼▼▼ [핵심] 열쇠를 '맨 위'로 뺐습니다. 이제 무조건 보입니다. ▼▼▼
+env:
+  TUYA_API_KEY: ${{ secrets.TUYA_API_KEY }}
+  TUYA_API_SECRET: ${{ secrets.TUYA_API_SECRET }}
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+  DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
 jobs:
   run-sensor-check:
@@ -21,10 +29,5 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: 수집기 실행
-        env: # ★ 여기가 제일 중요합니다! ★
-          TUYA_API_KEY: ${{ secrets.TUYA_API_KEY }}
-          TUYA_API_SECRET: ${{ secrets.TUYA_API_SECRET }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }} # <-- 이 줄이 꼭 있어야 합니다!
+        # env: 여기 있던 걸 맨 위로 올렸으니 이제 맘 편히 실행만 시킵니다.
         run: python collect_once.py
