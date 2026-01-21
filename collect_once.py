@@ -16,14 +16,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# ★ [원상복구] 이제 다시 35도로 돌려놓습니다. (정상 작동)
+# ★ [테스트용] 10도로 낮춰서 무조건 걸리게 함 (퇴근 전 35.0 복구 필수!)
 ALARM_CONFIG = {
-    "쌀창고": (5.0, 30.0),
-    "전처리실": (10.0, 30.0),
-    "양조실": (20.0, 20.0),
-    "제품포장실": (10.0, 30.0),
-    "부자재창고": (0.0, 40.0),
-    "default": (0.0, 35.0)
+    "default": (0.0, 10.0)
 }
 
 SENSORS = [
@@ -40,113 +35,89 @@ SENSORS = [
 ]
 
 # =======================================================
-# [2] 알림 함수
+# [2] ★여기가 핵심★ 수다쟁이 알림 함수
 # =======================================================
 def send_discord_alert(message):
+    print("\n----- [🕵️‍♂️ 디스코드 전송 정밀 진단] -----")
+    
+    # 1. 주소 있는지 확인
     if not DISCORD_WEBHOOK_URL:
+        print("❌ [치명적 오류] 웹훅 주소가 없습니다! (None)")
+        print("   👉 원인 1: GitHub Secrets에 'DISCORD_WEBHOOK_URL' 이름 오타")
+        print("   👉 원인 2: YAML 파일 env 설정 실수")
         return
+
+    print(f"🔑 주소 확인됨: {DISCORD_WEBHOOK_URL[:20]}... (정상)")
+    
     payload = {
         "content": message,
         "username": "천안공장 상황실",
         "avatar_url": "https://cdn-icons-png.flaticon.com/512/1035/1035689.png"
     }
+    
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json=payload)
-    except:
-        pass
+        # 2. 실제 전송 시도
+        res = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+        
+        # 3. 결과 브리핑
+        if res.status_code == 204:
+            print("✅ [성공] 디스코드 서버가 '잘 받았다'고 응답함 (204 OK)")
+        else:
+            print(f"❌ [거절] 디스코드 서버가 거부함! 상태코드: {res.status_code}")
+            print(f"📝 거절 사유: {res.text}")
+            
+    except Exception as e:
+        print(f"🔥 [폭발] 전송 도중 에러 발생: {e}")
+        
+    print("------------------------------------------\n")
 
 # =======================================================
-# [3] 메인 로직 (스마트 판단)
+# [3] 메인 로직
 # =======================================================
-print("🏭 [GitHub Action] 온도 점검 및 스마트 판단 시작...")
+print("🚀 [진단 모드] 수집 시작...")
 
 try:
     if not API_KEY or not SUPABASE_URL:
-        raise Exception("환경변수 없음")
+        print("❌ 필수 키(Tuya/Supabase)가 없습니다.")
 
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     cloud = tinytuya.Cloud(apiRegion=REGION, apiKey=API_KEY, apiSecret=API_SECRET)
     
-    kst = pytz.timezone('Asia/Seoul')
-    now = datetime.now(kst)
-    current_time_str = now.strftime("%Y-%m-%d %H:%M:%S%z")
-    
     alert_messages = []
     
     for sensor in SENSORS:
-        # 1. 센서값 조회
         uri = f'/v1.0/devices/{sensor["id"]}/status'
         res = cloud.cloudrequest(uri)
         
         temp = -999
-        humid = -999
         if res and 'result' in res:
             for item in res['result']:
                 if item['code'] == 'temp_current':
                     val = float(item['value'])
                     temp = val / 10.0 if val > 100 else val
-                elif item['code'] == 'humidity_value':
-                    val = float(item['value'])
-                    humid = val / 10.0 if val > 100 else val
         
         if temp != -999:
             place = sensor['place']
-            min_v, max_v = ALARM_CONFIG.get(place, ALARM_CONFIG["default"])
+            # 무조건 걸리게 테스트 설정 사용
+            min_v, max_v = ALARM_CONFIG["default"]
             
-            # 2. 현재 상태 판단
-            current_status = "정상"
+            # 기준 이탈 시 메시지 담기
             if temp < min_v or temp > max_v:
-                current_status = "비정상"
-            
-            # 3. 과거 상태 조회 (가장 최근 1개)
-            last_log = supabase.table("sensor_logs")\
-                .select("status")\
-                .eq("place", sensor['name'])\
-                .order("created_at", desc=True)\
-                .limit(1)\
-                .execute()
-            
-            prev_status = "정상"
-            if last_log.data and len(last_log.data) > 0:
-                prev_status = last_log.data[0]['status']
-            
-            # 4. 알림 여부 결정 (스마트 로직)
-            # [Case 1] 신규 발생 (정상 -> 비정상)
-            if current_status == "비정상" and prev_status != "비정상":
-                msg = f"🔥 **[발생] {place} 온도 이탈!**\n> 🌡️ 현재: **{temp}℃**\n> 📏 기준: {min_v}~{max_v}℃\n> 🤖 기기: {sensor['name']}"
+                print(f"🚨 {place} 경보 감지! (메시지 바구니에 담음)")
+                msg = f"🔥 [TEST] {place} {temp}℃"
                 alert_messages.append(msg)
-                print(f"🚨 {place} 신규 경보!")
-
-            # [Case 2] 상황 종료 (비정상 -> 정상) : ★공장장님이 기다리시는 메시지★
-            elif current_status == "정상" and prev_status == "비정상": # 아까 테스트값 '테스트'도 비정상으로 간주됨
-                msg = f"✅ **[복구] {place} 온도 정상화**\n> 🌡️ 현재: {temp}℃ (안정권 진입)\n> 🤖 기기: {sensor['name']}"
-                alert_messages.append(msg)
-                print(f"✅ {place} 해제 알림!")
-
-            # [Case 3] 지속 (비정상 -> 비정상)
-            elif current_status == "비정상" and prev_status == "비정상":
-                print(f"🔇 {place} 경보 지속 중 (생략)")
             
-            # 5. DB 저장
-            data = {
-                "place": sensor['name'], 
-                "temperature": temp, 
-                "humidity": humid,
-                "status": current_status, 
-                "created_at": current_time_str, 
-                "room_name": place
-            }
+            # DB 저장 (에러 방지용)
+            data = {"place": sensor['name'], "temperature": temp, "status": "테스트", "created_at": datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d %H:%M:%S%z"), "room_name": place}
             supabase.table("sensor_logs").insert(data).execute()
 
-    # 메시지 전송
+    # 메시지가 있으면 발송 시도
     if alert_messages:
-        final_msg = "## 📢 천안공장 상황 알림\n" + "\n".join(alert_messages) + f"\n\n🕒 {now.strftime('%H:%M:%S')}"
+        print(f"📢 총 {len(alert_messages)}건의 경보를 발송합니다.")
+        final_msg = "## 🕵️‍♂️ 범인 색출 테스트\n" + "\n".join(alert_messages)
         send_discord_alert(final_msg)
     else:
-        print("🕊️ 특이사항 없음")
+        print("❓ 이상하네요, 경보가 하나도 안 잡혔나요?")
 
 except Exception as e:
-    print(f"❌ 오류: {e}")
-    # 오류 발생시에도 알림
-    send_discord_alert(f"⚠️ 시스템 오류 발생: {e}")
-    exit(1)
+    print(f"❌ 전체 시스템 오류: {e}")
