@@ -1,0 +1,29 @@
+name: 천안공장 온도 자동수집 (10분 간격)
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # 10분마다 실행
+  workflow_dispatch:        # 수동 실행 버튼 추가
+
+jobs:
+  run-sensor-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 코드 가져오기
+        uses: actions/checkout@v3
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: 필요 도구 설치
+        run: pip install -r requirements.txt
+
+      - name: 수집기 실행
+        env: # 안전 금고에서 열쇠 꺼내서 쓰기
+          TUYA_API_KEY: ${{ secrets.TUYA_API_KEY }}
+          TUYA_API_SECRET: ${{ secrets.TUYA_API_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python collect_once.py
