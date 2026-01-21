@@ -86,7 +86,7 @@ def get_supabase():
 sb = get_supabase()
 
 # =========================================================
-# [설정] 센서 - 장소 매핑 설정
+# [설정] 센서 매핑 / 순서 / 경보 설정 (이 부분이 중요!)
 # =========================================================
 SENSOR_CONFIG = {
     "1호기": "쌀창고",
@@ -100,7 +100,20 @@ SENSOR_CONFIG = {
     "9호기": "제품포장실",
     "10호기": "부자재창고"
 }
-# 장소별 대표 아이콘 설정 (재미 요소)
+
+# ★ [순서 설정] 화면에 표시할 순서
+ROOM_ORDER = ["전처리실", "양조실", "제품포장실", "쌀창고", "부자재창고"]
+
+# ★ [경보 설정] 장소별 정상 온도 범위 (최소값, 최대값)
+ALARM_CONFIG = {
+    "쌀창고": (5.0, 25.0),
+    "전처리실": (10.0, 30.0),
+    "양조실": (20.0, 28.0),
+    "제품포장실": (10.0, 30.0),
+    "부자재창고": (0.0, 40.0),
+    "default": (0.0, 35.0)
+}
+
 ROOM_ICONS = {
     "쌀창고": "🌾", "전처리실": "🥣", "양조실": "🍶", 
     "제품포장실": "📦", "부자재창고": "🔧"
@@ -145,36 +158,25 @@ def fetch_tasks_all() -> list[dict]:
         print(f"DB Error: {e}")
         return []
 
-# [추가] 온도 데이터 가져오기 함수
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_sensor_logs(days=7) -> pd.DataFrame:
-    """최근 N일간의 센서 데이터를 가져옵니다."""
     try:
-        # UTC 기준으로 N일 전 계산
         start_date = (datetime.utcnow() - timedelta(days=days)).isoformat()
-        
-        # Supabase에서 데이터 조회 (created_at 기준 내림차순)
         res = sb.table("sensor_logs").select("*")\
             .gte("created_at", start_date)\
             .order("created_at", desc=True)\
             .limit(5000)\
             .execute()
-            
         data = res.data or []
         if not data: return pd.DataFrame()
         
         df = pd.DataFrame(data)
-        # 시간대 변환: UTC -> KST (한국시간)
         df['created_at'] = pd.to_datetime(df['created_at'])
         df['created_at'] = df['created_at'].dt.tz_convert('Asia/Seoul')
-        
-        # 'place' 컬럼(예: 1호기)을 'room_name'(예: 쌀창고)으로 매핑
-        df['sensor_id'] = df['place'] # 원래 ID 보존
+        df['sensor_id'] = df['place'] 
         df['room_name'] = df['place'].map(SENSOR_CONFIG).fillna("미분류")
-        
         return df
     except Exception as e:
-        st.error(f"센서 데이터 조회 중 오류: {e}")
         return pd.DataFrame()
 
 def clear_cache():
@@ -328,7 +330,6 @@ GRADE_OPTIONS = ["C등급", "B등급", "A등급", "공장장", "본부장", "대
 # =========================================================
 # 7) 메인 화면: 탭 구성
 # =========================================================
-# [수정] 탭 순서 변경: '실별온도관리'를 맨 마지막으로 이동
 tabs = st.tabs(["📊 대시보드", "📝 문제등록", "📅 계획수립", "🛠️ 조치입력", "🔍 조회/관리", "🌡️ 실별온도관리"])
 
 with tabs[0]: # 대시보드
@@ -454,7 +455,7 @@ with tabs[0]: # 대시보드
                     height=300
                 )
 
-with tabs[1]: # 문제 등록 (순서 변경됨)
+with tabs[1]: # 문제 등록
     st.subheader("📝 문제 등록")
     with st.form("form_register", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
@@ -476,7 +477,7 @@ with tabs[1]: # 문제 등록 (순서 변경됨)
                     st.success("저장 완료!")
                 except Exception as e: st.error(f"오류: {e}")
 
-with tabs[2]: # 계획 수립 (순서 변경됨)
+with tabs[2]: # 계획 수립
     st.subheader("📅 계획 수립")
     tasks = fetch_tasks_all()
     tasks = [t for t in tasks if t['status'] != '완료'] 
@@ -511,7 +512,7 @@ with tabs[2]: # 계획 수립 (순서 변경됨)
                 st.success("완료")
                 st.rerun()
 
-with tabs[3]: # 조치 입력 (순서 변경됨)
+with tabs[3]: # 조치 입력
     st.subheader("🛠️ 조치 결과 입력")
     all_tasks = fetch_tasks_all()
     target_tasks = [t for t in all_tasks if t['status'] != '완료']
@@ -569,7 +570,7 @@ with tabs[3]: # 조치 입력 (순서 변경됨)
                     st.success("완료 처리되었습니다.")
                     st.rerun()
 
-with tabs[4]: # 조회/관리 (순서 변경됨)
+with tabs[4]: # 조회/관리
     st.subheader("🔍 통합 조회 및 관리")
     c1, c2, c3 = st.columns([1, 1, 2])
     status_filter = c1.selectbox("상태", ["전체", "진행중", "완료"])
@@ -637,25 +638,11 @@ with tabs[4]: # 조회/관리 (순서 변경됨)
                 st.rerun()
 
 # =========================================================
-# [마지막 탭] 실별 온도관리 기능 (상한/하한 경보 기능 추가)
+# [마지막 탭] 실별 온도관리 기능
 # =========================================================
 with tabs[5]:
     st.subheader("🌡️ 실별 온도/습도 관리")
     
-    # ------------------------------------------------------------------
-    # 🚨 [설정] 장소별 정상 온도 범위 (최소값, 최대값)
-    # ------------------------------------------------------------------
-    # 여기에 원하시는 온도를 적으시면 됩니다.
-    ALARM_CONFIG = {
-        "쌀창고": (5.0, 25.0),      # 5도 ~ 25도 사이가 정상
-        "전처리실": (10.0, 30.0),   # 10도 ~ 30도 사이가 정상
-        "양조실": (20.0, 28.0),     # 발효실은 온도가 중요하니 좁게 설정
-        "제품포장실": (10.0, 30.0),
-        "부자재창고": (0.0, 40.0),
-        "default": (0.0, 35.0)      # 설정 안 된 곳 기본값
-    }
-    # ------------------------------------------------------------------
-
     # 1. 데이터 가져오기
     df_logs = fetch_sensor_logs(days=30)
     
@@ -665,23 +652,19 @@ with tabs[5]:
         available_rooms = set(SENSOR_CONFIG.values())
         room_list = [r for r in ROOM_ORDER if r in available_rooms]
         
-        st.markdown("#### 🏢 실별 현재 상태 (자동 경보 시스템)")
+        st.markdown("#### 🏢 실별 현재 상태 (평균 + 개별)")
         
-        # 범위 안내 문구 보여주기
+        # 안내 문구 (설정값 보기)
         with st.expander("ℹ️ 현재 설정된 정상 온도 범위 보기"):
             st.json(ALARM_CONFIG)
         
         latest_sensors = df_logs.sort_values('created_at').groupby('sensor_id').tail(1)
-        
         cols = st.columns(4)
         
         for idx, room in enumerate(room_list):
             room_sensors = latest_sensors[latest_sensors['room_name'] == room]
-            
             with cols[idx % 4]:
                 icon = ROOM_ICONS.get(room, "🏢")
-                
-                # 해당 장소의 설정값 가져오기 (없으면 기본값)
                 limit_min, limit_max = ALARM_CONFIG.get(room, ALARM_CONFIG["default"])
                 
                 if not room_sensors.empty:
@@ -689,15 +672,15 @@ with tabs[5]:
                     avg_humid = room_sensors['humidity'].mean()
                     
                     details_html = ""
-                    room_warning = False # 방 전체 경보 여부
+                    room_warning = False
                     
                     for _, row in room_sensors.iterrows():
                         s_name = row['sensor_id']
                         s_temp = row['temperature']
                         
-                        # 🚨 개별 센서 경보 체크 (범위 벗어나면 빨강)
+                        # 🚨 개별 센서 경보
                         if s_temp < limit_min or s_temp > limit_max:
-                            text_color = "#e03131" # 진한 빨강
+                            text_color = "#e03131"
                             weight = "bold"
                             icon_alert = "🚨"
                             room_warning = True
@@ -713,18 +696,14 @@ with tabs[5]:
                         </div>
                         """
                     
-                    # 평균값 색상 결정 (하나라도 문제 있으면 헤더도 빨갛게)
                     if room_warning:
                         header_color = "#e03131"
-                        status_msg = "비정상"
                     else:
                         header_color = "#212529"
-                        status_msg = "정상"
                     
                     last_time = room_sensors['created_at'].max()
                     time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - last_time).total_seconds() / 60
                     
-                    # 카드 출력
                     st.markdown(f"""
                     <div class="metric-card" style="border-top: 4px solid {header_color};">
                         <div class="metric-title">{icon} {room}</div>
@@ -749,15 +728,13 @@ with tabs[5]:
                     """, unsafe_allow_html=True)
         
         st.divider()
-        st.markdown("#### 📈 상세 분석")
+        st.markdown("#### 📈 상세 분석 (트렌드)")
         
         col_f1, col_f2 = st.columns([1, 2])
         sel_room = col_f1.selectbox("분석할 장소 선택", room_list)
         sel_range = col_f2.radio("기간 보기", ["24시간", "1주일", "1개월", "전체"], horizontal=True, index=0)
         
         target_df = df_logs[df_logs['room_name'] == sel_room].copy()
-        
-        # 선택된 방의 경계선(Limit) 가져오기
         r_min, r_max = ALARM_CONFIG.get(sel_room, ALARM_CONFIG["default"])
         
         now = datetime.now(pytz.timezone('Asia/Seoul'))
@@ -776,6 +753,8 @@ with tabs[5]:
         if target_df.empty:
             st.warning(f"선택한 기간에 '{sel_room}'의 데이터가 없습니다.")
         else:
+            st.caption("ℹ️ 그래프의 선 색깔은 각 '센서'를 나타냅니다.")
+            
             base = alt.Chart(target_df).encode(
                 x=alt.X('created_at:T', title='시간', axis=alt.Axis(format=x_format))
             )
@@ -787,15 +766,11 @@ with tabs[5]:
                 tooltip=['created_at', 'sensor_id', 'temperature']
             )
             
-            # 상한선 (빨간 점선)
+            # 상한선/하한선
             rule_max = base.mark_rule(color='red', strokeDash=[4, 4]).encode(y=alt.datum(r_max))
-            # 하한선 (파란 점선)
             rule_min = base.mark_rule(color='blue', strokeDash=[4, 4]).encode(y=alt.datum(r_min))
             
-            # 그래프 합치기 (선 + 상한선 + 하한선)
-            final_chart = (line_temp + rule_max + rule_min).properties(height=350)
-            
-            st.altair_chart(final_chart, use_container_width=True)
+            st.altair_chart((line_temp + rule_max + rule_min).properties(height=350), use_container_width=True)
             
             with st.expander(f"{sel_room} 전체 데이터 테이블"):
                 st.dataframe(target_df.sort_values('created_at', ascending=False), use_container_width=True)
