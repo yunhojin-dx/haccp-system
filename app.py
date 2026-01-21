@@ -647,7 +647,7 @@ with tabs[4]: # 조회/관리
                 st.rerun()
 
 # =========================================================
-# [마지막 탭] 실별 온도관리 기능 (이름 크게 + 팝업 설정)
+# [마지막 탭] 실별 온도관리 기능 (화면 깨짐 수정 + 글자 확대)
 # =========================================================
 with tabs[5]:
     # ------------------------------------------------------------------
@@ -732,41 +732,40 @@ with tabs[5]:
                             text_color = "#555"
                             weight = "normal"
                             icon_alert = ""
-                            
+                        
+                        # [중요] 여기도 한 줄로 붙였습니다.
                         details_html += f"""<div style="display:flex; justify-content:space-between; font-size:0.85rem; color:{text_color}; font-weight:{weight}; margin-top:2px;"><span>{s_name}</span><span>{icon_alert} {s_temp:.1f}℃</span></div>"""
                     
-                    # [디자인 수정] 경보 시 제목도 빨간색 + 글자 크기 대폭 확대
                     if room_warning:
-                        header_color = "#e03131" # 빨강
+                        header_color = "#e03131" # 경보 시 빨강
+                        title_color = "#e03131"
                     else:
-                        header_color = "#212529" # 진한 검정 (기존 회색보다 훨씬 진하게)
+                        header_color = "#212529" # 평소 진한 검정
+                        title_color = "#212529"
                     
                     last_time = room_sensors['created_at'].max()
                     time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - last_time).total_seconds() / 60
                     
-                    st.markdown(f"""
-<div class="metric-card" style="border-top: 4px solid {header_color};">
-    <div class="metric-title" style="font-size: 1.5rem; font-weight: 800; color: {header_color}; margin-bottom: 8px;">
-        {icon} {room}
-    </div>
-    
-    <div class="metric-value" style="color:{header_color}">{avg_temp:.1f}℃</div>
-    <div style="font-size: 0.8rem; color: #868e96;">기준: {limit_min}~{limit_max}℃</div>
-    <div style="font-size: 1.0rem; color: #4dabf7; margin-bottom:10px;">💧 {avg_humid:.1f}%</div>
-    <div style="border-top:1px solid #eee; margin:5px 0; padding-top:5px;"></div>
-    {details_html}
-    <div class="metric-sub" style="margin-top:8px;">{int(time_diff)}분 전 갱신</div>
-</div>
-""", unsafe_allow_html=True)
+                    # [핵심 수정] 아래 HTML 코드를 왼쪽 벽에 딱 붙였습니다 (들여쓰기 제거)
+                    # 이렇게 해야 코드로 인식되지 않고 정상적으로 카드가 나옵니다.
+                    card_html = f"""<div class="metric-card" style="border-top: 4px solid {header_color};">
+<div class="metric-title" style="font-size: 1.6rem; font-weight: 800; color: {title_color}; margin-bottom: 8px;">{icon} {room}</div>
+<div class="metric-value" style="color:{header_color}">{avg_temp:.1f}℃</div>
+<div style="font-size: 0.8rem; color: #868e96;">기준: {limit_min}~{limit_max}℃</div>
+<div style="font-size: 1.0rem; color: #4dabf7; margin-bottom:10px;">💧 {avg_humid:.1f}%</div>
+<div style="border-top:1px solid #eee; margin:5px 0; padding-top:5px;"></div>
+{details_html}
+<div class="metric-sub" style="margin-top:8px;">{int(time_diff)}분 전 갱신</div>
+</div>"""
+                    
+                    st.markdown(card_html, unsafe_allow_html=True)
                     
                 else:
-                    st.markdown(f"""
-<div class="metric-card" style="opacity: 0.6;">
-    <div class="metric-title" style="font-size: 1.4rem; font-weight: 800; color: #adb5bd;">{icon} {room}</div>
-    <div class="metric-value">-</div>
-    <div class="metric-sub">데이터 없음</div>
-</div>
-""", unsafe_allow_html=True)
+                    st.markdown(f"""<div class="metric-card" style="opacity: 0.6;">
+<div class="metric-title" style="font-size: 1.4rem; font-weight: 800; color: #adb5bd;">{icon} {room}</div>
+<div class="metric-value">-</div>
+<div class="metric-sub">데이터 없음</div>
+</div>""", unsafe_allow_html=True)
         
         st.divider()
         st.markdown("#### 📈 상세 분석 (트렌드)")
