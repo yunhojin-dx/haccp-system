@@ -647,7 +647,7 @@ with tabs[4]: # 조회/관리
                 st.rerun()
 
 # =========================================================
-# [마지막 탭] 실별 온도관리 기능 (그래프 개선 + 0~50도 고정)
+# [마지막 탭] 실별 온도관리 기능 (설정값 수정 기능 추가)
 # =========================================================
 with tabs[5]:
     st.subheader("🌡️ 실별 온도/습도 관리")
@@ -655,16 +655,53 @@ with tabs[5]:
     # 1. 데이터 가져오기
     df_logs = fetch_sensor_logs(days=30)
     
+    # ------------------------------------------------------------------
+    # 🎛️ [설정 패널] 상한/하한값 조정 (데이터프레임 에디터 사용)
+    # ------------------------------------------------------------------
+    st.markdown("#### ⚙️ 정상 온도 범위 설정")
+    
+    # 현재 설정(ALARM_CONFIG)을 표(DataFrame)로 변환
+    # (session_state를 써서 수정한 값을 기억하게 함)
+    if "alarm_df" not in st.session_state:
+        # 딕셔너리를 리스트로 변환
+        data_list = []
+        for room, (min_v, max_v) in ALARM_CONFIG.items():
+            if room != "default": # default는 숨김
+                data_list.append({"장소": room, "최저온도(℃)": min_v, "최고온도(℃)": max_v})
+        
+        # 순서 정렬 (ROOM_ORDER 기준)
+        data_list.sort(key=lambda x: ROOM_ORDER.index(x["장소"]) if x["장소"] in ROOM_ORDER else 999)
+        st.session_state.alarm_df = pd.DataFrame(data_list)
+
+    # 에디터 출력 (여기서 숫자 수정 가능)
+    edited_df = st.data_editor(
+        st.session_state.alarm_df,
+        column_config={
+            "장소": st.column_config.TextColumn("장소", disabled=True), # 장소명은 수정 불가
+            "최저온도(℃)": st.column_config.NumberColumn("최저(Min)", min_value=-10, max_value=50, step=0.5, format="%.1f"),
+            "최고온도(℃)": st.column_config.NumberColumn("최고(Max)", min_value=-10, max_value=60, step=0.5, format="%.1f"),
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed" # 행 추가/삭제 불가
+    )
+
+    # 수정된 값을 다시 딕셔너리로 변환하여 적용
+    # (실제 앱에서는 이 값을 DB에 저장해야 영구 반영되지만, 지금은 임시 반영)
+    NEW_ALARM_CONFIG = ALARM_CONFIG.copy()
+    for index, row in edited_df.iterrows():
+        NEW_ALARM_CONFIG[row["장소"]] = (row["최저온도(℃)"], row["최고온도(℃)"])
+    
+    # ------------------------------------------------------------------
+
     if df_logs.empty:
         st.info("📊 수집된 센서 데이터가 없습니다. (센서 연동 스크립트가 실행 중인지 확인하세요)")
     else:
         available_rooms = set(SENSOR_CONFIG.values())
         room_list = [r for r in ROOM_ORDER if r in available_rooms]
         
+        st.divider()
         st.markdown("#### 🏢 실별 현재 상태 (평균 + 개별)")
-        
-        with st.expander("ℹ️ 현재 설정된 정상 온도 범위 보기"):
-            st.json(ALARM_CONFIG)
         
         latest_sensors = df_logs.sort_values('created_at').groupby('sensor_id').tail(1)
         cols = st.columns(4)
@@ -673,7 +710,8 @@ with tabs[5]:
             room_sensors = latest_sensors[latest_sensors['room_name'] == room]
             with cols[idx % 4]:
                 icon = ROOM_ICONS.get(room, "🏢")
-                limit_min, limit_max = ALARM_CONFIG.get(room, ALARM_CONFIG["default"])
+                # ★ 수정된 설정값(NEW_ALARM_CONFIG) 사용
+                limit_min, limit_max = NEW_ALARM_CONFIG.get(room, NEW_ALARM_CONFIG["default"])
                 
                 if not room_sensors.empty:
                     avg_temp = room_sensors['temperature'].mean()
@@ -696,7 +734,6 @@ with tabs[5]:
                             weight = "normal"
                             icon_alert = ""
                             
-                        # HTML 디자인 (들여쓰기 제거)
                         details_html += f"""<div style="display:flex; justify-content:space-between; font-size:0.85rem; color:{text_color}; font-weight:{weight}; margin-top:2px;"><span>{s_name}</span><span>{icon_alert} {s_temp:.1f}℃</span></div>"""
                     
                     if room_warning:
@@ -736,7 +773,8 @@ with tabs[5]:
         sel_range = col_f2.radio("기간 보기", ["24시간", "1주일", "1개월", "전체"], horizontal=True, index=0)
         
         target_df = df_logs[df_logs['room_name'] == sel_room].copy()
-        r_min, r_max = ALARM_CONFIG.get(sel_room, ALARM_CONFIG["default"])
+        # ★ 수정된 설정값(NEW_ALARM_CONFIG) 사용
+        r_min, r_max = NEW_ALARM_CONFIG.get(sel_room, NEW_ALARM_CONFIG["default"])
         
         now = datetime.now(pytz.timezone('Asia/Seoul'))
         if sel_range == "24시간":
@@ -756,50 +794,31 @@ with tabs[5]:
         else:
             st.caption("ℹ️ **검은색 굵은 선**은 '평균 온도', **연한 색 선**은 '각 센서별 온도'입니다.")
             
-            # [1] 기본 차트 설정
             base = alt.Chart(target_df).encode(
                 x=alt.X('created_at:T', title='시간', axis=alt.Axis(format=x_format))
             )
             
-            # [2] 개별 센서 라인 (연하고 얇게)
-            lines_individual = base.mark_line(
-                strokeWidth=1,  # 얇게
-                opacity=0.5     # 반투명
-            ).encode(
-                y=alt.Y('temperature:Q', 
-                        title='온도 (℃)', 
-                        scale=alt.Scale(domain=[0, 50])), # ★ 0~50도 고정
+            lines_individual = base.mark_line(strokeWidth=1, opacity=0.5).encode(
+                y=alt.Y('temperature:Q', title='온도 (℃)', scale=alt.Scale(domain=[0, 50])),
                 color=alt.Color('sensor_id:N', legend=alt.Legend(title="센서명")),
                 tooltip=['created_at', 'sensor_id', 'temperature']
             )
 
-            # [3] 평균 라인 (진하고 굵게)
-            line_average = base.mark_line(
-                strokeWidth=3,  # 굵게
-                color='#333333' # 진한 회색/검정
-            ).encode(
-                y=alt.Y('mean(temperature):Q') # 평균값 자동 계산
+            line_average = base.mark_line(strokeWidth=3, color='#333333').encode(
+                y=alt.Y('mean(temperature):Q')
             )
 
-            # [4] 상한선/하한선 (별도 데이터로 분리하여 세로줄 버그 해결)
-            # 가상의 데이터프레임을 만들어서 가로선만 그립니다.
             limit_df = pd.DataFrame([
                 {"val": r_max, "type": "상한선", "color": "red"},
                 {"val": r_min, "type": "하한선", "color": "blue"}
             ])
             
-            rules = alt.Chart(limit_df).mark_rule(
-                strokeDash=[4, 4], # 점선
-                size=2
-            ).encode(
+            rules = alt.Chart(limit_df).mark_rule(strokeDash=[4, 4], size=2).encode(
                 y='val:Q',
                 color=alt.Color('type:N', scale=alt.Scale(domain=['상한선', '하한선'], range=['red', 'blue']))
             )
             
-            # 차트 합치기 (개별선 + 평균선 + 제한선)
-            final_chart = (lines_individual + line_average + rules).properties(height=350)
-            
-            st.altair_chart(final_chart, use_container_width=True)
+            st.altair_chart((lines_individual + line_average + rules).properties(height=350), use_container_width=True)
             
             with st.expander(f"{sel_room} 전체 데이터 테이블"):
                 st.dataframe(target_df.sort_values('created_at', ascending=False), use_container_width=True)
