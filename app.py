@@ -17,7 +17,7 @@ from PIL import Image
 from supabase import create_client
 
 # =========================================================
-# 0) 기본 UI 설정
+# 0) 기본 UI 설정 (CSS 스타일 정의)
 # =========================================================
 st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide", initial_sidebar_state="collapsed")
 
@@ -25,6 +25,7 @@ def get_image_base64(file_path):
     with open(file_path, "rb") as f: data = f.read()
     return base64.b64encode(data).decode()
 
+# ★ [중요] 여기가 스타일을 담당합니다.
 st.markdown("""
 <style>
     .block-container { padding-top: 3rem; padding-bottom: 3rem; font-family: 'Pretendard', sans-serif; }
@@ -35,18 +36,26 @@ st.markdown("""
     .header-text-container { flex: 1; }
     h1.main-title { font-size: 3.2rem !important; font-weight: 800 !important; margin: 0 !important; color: #212529; letter-spacing: -1px; }
     .sub-caption { font-size: 1.2rem; color: #868e96; margin-top: 0.5rem; font-weight: 500; }
+    
+    /* 탭 스타일 */
     div[data-testid="stTabs"] { gap: 0px; }
     div[data-testid="stTabs"] button[data-testid="stTab"] { background-color: #f8f9fa; color: #495057; border: 1px solid #dee2e6; border-bottom: none; border-radius: 10px 10px 0 0; padding: 1rem 2rem; font-weight: 700; margin-right: 4px; }
     div[data-testid="stTabs"] button[data-testid="stTab"][aria-selected="true"] { background-color: #ffffff; color: #e03131; border-top: 3px solid #e03131; border-bottom: 2px solid #ffffff; margin-bottom: -2px; z-index: 10; }
-    div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] { border-top: 2px solid #dee2e6; margin-top: -2px; }
-    .grade-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; font-size: 0.9rem; color: white; background-color: #adb5bd; margin-right: 0.5rem; }
     
-    /* 온도관리 카드 스타일 */
-    .metric-card { background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    /* 온도관리 카드 스타일 (깨짐 방지 수정됨) */
+    .metric-card { 
+        background-color: #f8f9fa; 
+        border: 1px solid #e9ecef; 
+        border-radius: 8px; 
+        padding: 15px; 
+        text-align: center; 
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05); 
+        margin-bottom: 10px;
+    }
     .metric-title { font-size: 0.9rem; color: #868e96; font-weight: 600; margin-bottom: 5px; }
     .metric-value { font-size: 1.6rem; font-weight: 700; color: #212529; }
     .metric-sub { font-size: 0.8rem; color: #adb5bd; margin-top: 5px; }
-    .temp-high { color: #fa5252 !important; } /* 고온 경보 색상 */
+    .temp-high { color: #fa5252 !important; } 
 </style>
 """, unsafe_allow_html=True)
 
@@ -86,7 +95,7 @@ def get_supabase():
 sb = get_supabase()
 
 # =========================================================
-# [설정] 센서 매핑 / 순서 / 경보 설정 (이 부분이 중요!)
+# [설정] 센서 매핑 / 순서 / 경보 설정
 # =========================================================
 SENSOR_CONFIG = {
     "1호기": "쌀창고",
@@ -101,10 +110,10 @@ SENSOR_CONFIG = {
     "10호기": "부자재창고"
 }
 
-# ★ [순서 설정] 화면에 표시할 순서
+# ★ [순서 설정]
 ROOM_ORDER = ["전처리실", "양조실", "제품포장실", "쌀창고", "부자재창고"]
 
-# ★ [경보 설정] 장소별 정상 온도 범위 (최소값, 최대값)
+# ★ [경보 설정] (최소값, 최대값)
 ALARM_CONFIG = {
     "쌀창고": (5.0, 25.0),
     "전처리실": (10.0, 30.0),
@@ -638,7 +647,7 @@ with tabs[4]: # 조회/관리
                 st.rerun()
 
 # =========================================================
-# [마지막 탭] 실별 온도관리 기능
+# [마지막 탭] 실별 온도관리 기능 (디자인 깨짐 수정됨)
 # =========================================================
 with tabs[5]:
     st.subheader("🌡️ 실별 온도/습도 관리")
@@ -654,7 +663,6 @@ with tabs[5]:
         
         st.markdown("#### 🏢 실별 현재 상태 (평균 + 개별)")
         
-        # 안내 문구 (설정값 보기)
         with st.expander("ℹ️ 현재 설정된 정상 온도 범위 보기"):
             st.json(ALARM_CONFIG)
         
@@ -678,7 +686,6 @@ with tabs[5]:
                         s_name = row['sensor_id']
                         s_temp = row['temperature']
                         
-                        # 🚨 개별 센서 경보
                         if s_temp < limit_min or s_temp > limit_max:
                             text_color = "#e03131"
                             weight = "bold"
@@ -689,12 +696,8 @@ with tabs[5]:
                             weight = "normal"
                             icon_alert = ""
                             
-                        details_html += f"""
-                        <div style="display:flex; justify-content:space-between; font-size:0.85rem; color:{text_color}; font-weight:{weight}; margin-top:2px;">
-                            <span>{s_name}</span>
-                            <span>{icon_alert} {s_temp:.1f}℃</span>
-                        </div>
-                        """
+                        # [핵심 수정] 들여쓰기 제거하여 한 줄로 작성 (디자인 깨짐 해결)
+                        details_html += f"""<div style="display:flex; justify-content:space-between; font-size:0.85rem; color:{text_color}; font-weight:{weight}; margin-top:2px;"><span>{s_name}</span><span>{icon_alert} {s_temp:.1f}℃</span></div>"""
                     
                     if room_warning:
                         header_color = "#e03131"
@@ -704,28 +707,27 @@ with tabs[5]:
                     last_time = room_sensors['created_at'].max()
                     time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - last_time).total_seconds() / 60
                     
+                    # [핵심 수정] HTML 전체를 f-string 안에 들여쓰기 없이 배치
                     st.markdown(f"""
-                    <div class="metric-card" style="border-top: 4px solid {header_color};">
-                        <div class="metric-title">{icon} {room}</div>
-                        <div class="metric-value" style="color:{header_color}">{avg_temp:.1f}℃</div>
-                        <div style="font-size: 0.8rem; color: #868e96;">기준: {limit_min}~{limit_max}℃</div>
-                        <div style="font-size: 1.0rem; color: #4dabf7; margin-bottom:10px;">💧 {avg_humid:.1f}%</div>
-                        
-                        <div style="border-top:1px solid #eee; margin:5px 0; padding-top:5px;"></div>
-                        {details_html}
-                        
-                        <div class="metric-sub" style="margin-top:8px;">{int(time_diff)}분 전 갱신</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+<div class="metric-card" style="border-top: 4px solid {header_color};">
+    <div class="metric-title">{icon} {room}</div>
+    <div class="metric-value" style="color:{header_color}">{avg_temp:.1f}℃</div>
+    <div style="font-size: 0.8rem; color: #868e96;">기준: {limit_min}~{limit_max}℃</div>
+    <div style="font-size: 1.0rem; color: #4dabf7; margin-bottom:10px;">💧 {avg_humid:.1f}%</div>
+    <div style="border-top:1px solid #eee; margin:5px 0; padding-top:5px;"></div>
+    {details_html}
+    <div class="metric-sub" style="margin-top:8px;">{int(time_diff)}분 전 갱신</div>
+</div>
+""", unsafe_allow_html=True)
                     
                 else:
                     st.markdown(f"""
-                    <div class="metric-card" style="opacity: 0.6;">
-                        <div class="metric-title">{icon} {room}</div>
-                        <div class="metric-value">-</div>
-                        <div class="metric-sub">데이터 없음</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+<div class="metric-card" style="opacity: 0.6;">
+    <div class="metric-title">{icon} {room}</div>
+    <div class="metric-value">-</div>
+    <div class="metric-sub">데이터 없음</div>
+</div>
+""", unsafe_allow_html=True)
         
         st.divider()
         st.markdown("#### 📈 상세 분석 (트렌드)")
