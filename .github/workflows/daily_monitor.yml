@@ -3,7 +3,7 @@ name: 천안공장 온도 자동수집 (10분 간격)
 on:
   schedule:
     - cron: '*/10 * * * *'  # 10분마다 실행
-  workflow_dispatch:        # 수동 실행 버튼 추가
+  workflow_dispatch:        # 수동 실행 버튼
 
 jobs:
   run-sensor-check:
@@ -21,11 +21,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: 수집기 실행
-        env: # 안전 금고에서 열쇠 꺼내서 쓰기
+        env: # ★ 여기가 제일 중요합니다! ★
           TUYA_API_KEY: ${{ secrets.TUYA_API_KEY }}
           TUYA_API_SECRET: ${{ secrets.TUYA_API_SECRET }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # ▼▼▼ 여기가 핵심! 디스코드 주소 열쇠를 로봇에게 쥐어줌 ▼▼▼
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }} # <-- 이 줄이 꼭 있어야 합니다!
         run: python collect_once.py
