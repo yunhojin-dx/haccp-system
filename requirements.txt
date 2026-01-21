@@ -7,3 +7,5 @@ Pillow
 xlsxwriter
 pyarrow
 openpyxl
+tinytuya
+pytz
