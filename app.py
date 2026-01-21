@@ -647,11 +647,11 @@ with tabs[4]: # 조회/관리
                 st.rerun()
 
 # =========================================================
-# [마지막 탭] 실별 온도관리 기능 (화면 깨짐 수정 + 글자 확대)
+# [마지막 탭] 실별 온도관리 기능 (그룹화 + 사이즈 최적화)
 # =========================================================
 with tabs[5]:
     # ------------------------------------------------------------------
-    # 0. 데이터 준비 (설정값 로드)
+    # 0. 데이터 및 설정 준비
     # ------------------------------------------------------------------
     if "alarm_df" not in st.session_state:
         data_list = []
@@ -662,9 +662,6 @@ with tabs[5]:
         data_list.sort(key=lambda x: ROOM_ORDER.index(x["장소"]) if x["장소"] in ROOM_ORDER else 999)
         st.session_state.alarm_df = pd.DataFrame(data_list)
 
-    # ------------------------------------------------------------------
-    # 1. 팝업창(Dialog) 함수
-    # ------------------------------------------------------------------
     @st.dialog("⚙️ 정상 온도 범위 설정")
     def open_setting_popup():
         st.caption("각 장소별 정상 온도 범위를 수정하세요.")
@@ -681,9 +678,6 @@ with tabs[5]:
             st.session_state.alarm_df = edited
             st.rerun()
 
-    # ------------------------------------------------------------------
-    # 2. 메인 화면 구성
-    # ------------------------------------------------------------------
     col_head, col_btn = st.columns([6, 1], vertical_alignment="center")
     with col_head: st.subheader("🌡️ 실별 온도/습도 관리")
     with col_btn:
@@ -695,83 +689,113 @@ with tabs[5]:
 
     df_logs = fetch_sensor_logs(days=30)
     
+    # ------------------------------------------------------------------
+    # ★ [그룹 정의] 사용자가 요청한 3개 그룹
+    # ------------------------------------------------------------------
+    ROOM_GROUPS = {
+        "🏭 작업장 (Workplace)": ["전처리실", "양조실", "제품포장실"],
+        "📦 창고 (Warehouse)": ["쌀창고", "부자재창고"],
+        "🌳 외곽 (Outdoor)": [] # 나중에 추가 예정
+    }
+
     if df_logs.empty:
         st.info("📊 수집된 센서 데이터가 없습니다.")
     else:
-        available_rooms = set(SENSOR_CONFIG.values())
-        room_list = [r for r in ROOM_ORDER if r in available_rooms]
-        
-        st.markdown("#### 🏢 실별 현재 상태")
-        
         latest_sensors = df_logs.sort_values('created_at').groupby('sensor_id').tail(1)
-        cols = st.columns(4)
         
-        for idx, room in enumerate(room_list):
-            room_sensors = latest_sensors[latest_sensors['room_name'] == room]
-            with cols[idx % 4]:
-                icon = ROOM_ICONS.get(room, "🏢")
-                limit_min, limit_max = ACTIVE_CONFIG.get(room, ACTIVE_CONFIG["default"])
+        # ------------------------------------------------------------------
+        # 그룹별로 반복하며 카드 출력
+        # ------------------------------------------------------------------
+        for group_name, rooms in ROOM_GROUPS.items():
+            # 해당 그룹에 표시할 방이 없으면 건너뜀 (외곽 등)
+            if not rooms: 
+                continue
+
+            st.markdown(f"##### {group_name}") # 그룹 제목
+            
+            # 한 줄에 4개씩 카드 배치
+            cols = st.columns(4)
+            
+            for idx, room in enumerate(rooms):
+                room_sensors = latest_sensors[latest_sensors['room_name'] == room]
                 
-                if not room_sensors.empty:
-                    avg_temp = room_sensors['temperature'].mean()
-                    avg_humid = room_sensors['humidity'].mean()
+                with cols[idx % 4]: # 4열 그리드
+                    icon = ROOM_ICONS.get(room, "🏢")
+                    limit_min, limit_max = ACTIVE_CONFIG.get(room, ACTIVE_CONFIG["default"])
                     
-                    details_html = ""
-                    room_warning = False
-                    
-                    for _, row in room_sensors.iterrows():
-                        s_name = row['sensor_id']
-                        s_temp = row['temperature']
+                    if not room_sensors.empty:
+                        avg_temp = room_sensors['temperature'].mean()
+                        avg_humid = room_sensors['humidity'].mean()
                         
-                        if s_temp < limit_min or s_temp > limit_max:
-                            text_color = "#e03131"
-                            weight = "bold"
-                            icon_alert = "🚨"
-                            room_warning = True
+                        details_html = ""
+                        room_warning = False
+                        
+                        for _, row in room_sensors.iterrows():
+                            s_name = row['sensor_id']
+                            s_temp = row['temperature']
+                            
+                            if s_temp < limit_min or s_temp > limit_max:
+                                text_color = "#e03131"
+                                weight = "bold"
+                                icon_alert = "🚨"
+                                room_warning = True
+                            else:
+                                text_color = "#555"
+                                weight = "normal"
+                                icon_alert = ""
+                            
+                            # [디자인] 상세 내역 글자 크기 살짝 축소 (0.85 -> 0.75rem)
+                            details_html += f"""<div style="display:flex; justify-content:space-between; font-size:0.75rem; color:{text_color}; font-weight:{weight}; margin-top:1px;"><span>{s_name}</span><span>{icon_alert} {s_temp:.1f}℃</span></div>"""
+                        
+                        if room_warning:
+                            header_color = "#e03131"
+                            title_color = "#e03131"
                         else:
-                            text_color = "#555"
-                            weight = "normal"
-                            icon_alert = ""
+                            header_color = "#212529"
+                            title_color = "#212529"
                         
-                        # [중요] 여기도 한 줄로 붙였습니다.
-                        details_html += f"""<div style="display:flex; justify-content:space-between; font-size:0.85rem; color:{text_color}; font-weight:{weight}; margin-top:2px;"><span>{s_name}</span><span>{icon_alert} {s_temp:.1f}℃</span></div>"""
-                    
-                    if room_warning:
-                        header_color = "#e03131" # 경보 시 빨강
-                        title_color = "#e03131"
-                    else:
-                        header_color = "#212529" # 평소 진한 검정
-                        title_color = "#212529"
-                    
-                    last_time = room_sensors['created_at'].max()
-                    time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - last_time).total_seconds() / 60
-                    
-                    # [핵심 수정] 아래 HTML 코드를 왼쪽 벽에 딱 붙였습니다 (들여쓰기 제거)
-                    # 이렇게 해야 코드로 인식되지 않고 정상적으로 카드가 나옵니다.
-                    card_html = f"""<div class="metric-card" style="border-top: 4px solid {header_color};">
-<div class="metric-title" style="font-size: 1.6rem; font-weight: 800; color: {title_color}; margin-bottom: 8px;">{icon} {room}</div>
-<div class="metric-value" style="color:{header_color}">{avg_temp:.1f}℃</div>
-<div style="font-size: 0.8rem; color: #868e96;">기준: {limit_min}~{limit_max}℃</div>
-<div style="font-size: 1.0rem; color: #4dabf7; margin-bottom:10px;">💧 {avg_humid:.1f}%</div>
-<div style="border-top:1px solid #eee; margin:5px 0; padding-top:5px;"></div>
-{details_html}
-<div class="metric-sub" style="margin-top:8px;">{int(time_diff)}분 전 갱신</div>
+                        last_time = room_sensors['created_at'].max()
+                        time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - last_time).total_seconds() / 60
+                        
+                        # [핵심 수정] 카드 사이즈 전체적 축소 (padding, font-size 조절)
+                        card_html = f"""<div class="metric-card" style="border-top: 3px solid {header_color}; padding: 10px;">
+    <div class="metric-title" style="font-size: 1.1rem; font-weight: 800; color: {title_color}; margin-bottom: 4px;">{icon} {room}</div>
+    <div class="metric-value" style="font-size: 1.4rem; color:{header_color}">{avg_temp:.1f}℃</div>
+    <div style="font-size: 0.75rem; color: #868e96;">기준: {limit_min}~{limit_max}℃</div>
+    <div style="font-size: 0.9rem; color: #4dabf7; margin-bottom:6px;">💧 {avg_humid:.1f}%</div>
+    <div style="border-top:1px solid #eee; margin:4px 0; padding-top:4px;"></div>
+    {details_html}
+    <div class="metric-sub" style="margin-top:6px; font-size: 0.7rem;">{int(time_diff)}분 전</div>
 </div>"""
-                    
-                    st.markdown(card_html, unsafe_allow_html=True)
-                    
-                else:
-                    st.markdown(f"""<div class="metric-card" style="opacity: 0.6;">
-<div class="metric-title" style="font-size: 1.4rem; font-weight: 800; color: #adb5bd;">{icon} {room}</div>
-<div class="metric-value">-</div>
-<div class="metric-sub">데이터 없음</div>
+                        st.markdown(card_html, unsafe_allow_html=True)
+                        
+                    else:
+                        # 데이터 없을 때 카드
+                        st.markdown(f"""<div class="metric-card" style="opacity: 0.6; padding: 10px;">
+    <div class="metric-title" style="font-size: 1.0rem; font-weight: 800; color: #adb5bd;">{icon} {room}</div>
+    <div class="metric-value" style="font-size: 1.2rem;">-</div>
+    <div class="metric-sub" style="font-size: 0.7rem;">데이터 없음</div>
 </div>""", unsafe_allow_html=True)
-        
+            
+            st.markdown("") # 그룹 간 여백
+
+        # ------------------------------------------------------------------
+        # 하단: 상세 트렌드 분석
+        # ------------------------------------------------------------------
         st.divider()
         st.markdown("#### 📈 상세 분석 (트렌드)")
         
         col_f1, col_f2 = st.columns([1, 2])
-        sel_room = col_f1.selectbox("분석할 장소 선택", room_list)
+        # 분석 선택 상자에는 모든 방을 합쳐서 보여줌
+        all_rooms_flat = ROOM_GROUPS["🏭 작업장 (Workplace)"] + ROOM_GROUPS["📦 창고 (Warehouse)"] + ROOM_GROUPS["🌳 외곽 (Outdoor)"]
+        # 실제 데이터가 있는 방만 필터링
+        valid_rooms = [r for r in all_rooms_flat if r in available_rooms]
+        
+        if not valid_rooms:
+             # 혹시 그룹에 정의 안 된 방이 있을 수 있으니 fallback
+             valid_rooms = list(available_rooms)
+
+        sel_room = col_f1.selectbox("분석할 장소 선택", valid_rooms)
         sel_range = col_f2.radio("기간 보기", ["24시간", "1주일", "1개월", "전체"], horizontal=True, index=0)
         
         target_df = df_logs[df_logs['room_name'] == sel_room].copy()
