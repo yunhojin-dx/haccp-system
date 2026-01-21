@@ -6,6 +6,7 @@ import math
 import base64
 import tempfile
 from datetime import date, datetime, timedelta
+import pytz # 시간대 변환을 위해 추가
 
 import requests
 import pandas as pd
@@ -39,6 +40,13 @@ st.markdown("""
     div[data-testid="stTabs"] button[data-testid="stTab"][aria-selected="true"] { background-color: #ffffff; color: #e03131; border-top: 3px solid #e03131; border-bottom: 2px solid #ffffff; margin-bottom: -2px; z-index: 10; }
     div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] { border-top: 2px solid #dee2e6; margin-top: -2px; }
     .grade-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; font-size: 0.9rem; color: white; background-color: #adb5bd; margin-right: 0.5rem; }
+    
+    /* 온도관리 카드 스타일 */
+    .metric-card { background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .metric-title { font-size: 0.9rem; color: #868e96; font-weight: 600; margin-bottom: 5px; }
+    .metric-value { font-size: 1.6rem; font-weight: 700; color: #212529; }
+    .metric-sub { font-size: 0.8rem; color: #adb5bd; margin-top: 5px; }
+    .temp-high { color: #fa5252 !important; } /* 고온 경보 색상 */
 </style>
 """, unsafe_allow_html=True)
 
@@ -54,7 +62,7 @@ st.markdown(f"""
     <div class="header-image-container">{logo_html}</div>
     <div class="header-text-container">
         <h1 class="main-title">천안공장 위생 개선관리</h1>
-        <p class="sub-caption">스마트 해썹(HACCP) 대응을 위한 현장 개선 데이터 관리 시스템</p>
+        <p class="sub-caption">스마트 해썹(HACCP) 대응을 위한 현장 개선 및 온습도 데이터 관리 시스템</p>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -77,9 +85,29 @@ def get_supabase():
 
 sb = get_supabase()
 
+# =========================================================
+# [설정] 센서 - 장소 매핑 설정 (여기서 이름을 바꾸세요!)
+# =========================================================
+SENSOR_CONFIG = {
+    "1호기": "쌀창고",
+    "2호기": "전처리실",
+    "3호기": "전처리실",
+    "4호기": "전처리실",
+    "5호기": "양조실",
+    "6호기": "양조실",
+    "7호기": "양조실",
+    "8호기": "제품포장실",
+    "9호기": "제품포장실",
+    "10호기": "부자재창고"
+}
+# 장소별 대표 아이콘 설정 (재미 요소)
+ROOM_ICONS = {
+    "쌀창고": "🌾", "전처리실": "🥣", "양조실": "🍶", 
+    "제품포장실": "📦", "부자재창고": "🔧"
+}
 
 # =========================================================
-# 2) 핵심 로직
+# 2) 핵심 로직 (기존 + 온도데이터 추가)
 # =========================================================
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_tasks_all() -> list[dict]:
@@ -117,8 +145,42 @@ def fetch_tasks_all() -> list[dict]:
         print(f"DB Error: {e}")
         return []
 
+# [추가] 온도 데이터 가져오기 함수
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_sensor_logs(days=7) -> pd.DataFrame:
+    """최근 N일간의 센서 데이터를 가져옵니다."""
+    try:
+        # UTC 기준으로 N일 전 계산
+        start_date = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        
+        # Supabase에서 데이터 조회 (created_at 기준 내림차순)
+        res = sb.table("sensor_logs").select("*")\
+            .gte("created_at", start_date)\
+            .order("created_at", desc=True)\
+            .limit(5000)\
+            .execute()
+            
+        data = res.data or []
+        if not data: return pd.DataFrame()
+        
+        df = pd.DataFrame(data)
+        # 시간대 변환: UTC -> KST (한국시간)
+        df['created_at'] = pd.to_datetime(df['created_at'])
+        df['created_at'] = df['created_at'].dt.tz_convert('Asia/Seoul')
+        
+        # 'place' 컬럼(예: 1호기)을 'room_name'(예: 쌀창고)으로 매핑
+        # 센서 데이터의 'place'에는 '1호기', '2호기' 등의 값이 들어있다고 가정
+        df['sensor_id'] = df['place'] # 원래 ID 보존
+        df['room_name'] = df['place'].map(SENSOR_CONFIG).fillna("미분류")
+        
+        return df
+    except Exception as e:
+        st.error(f"센서 데이터 조회 중 오류: {e}")
+        return pd.DataFrame()
+
 def clear_cache():
     fetch_tasks_all.clear()
+    fetch_sensor_logs.clear()
 
 def insert_task(issue_date, location, issue_text, reporter, grade):
     row = {
@@ -190,6 +252,7 @@ def download_image_to_temp(url: str) -> str | None:
     except: return None
 
 def export_excel(tasks: list[dict]) -> bytes:
+    # (기존 코드 유지)
     rows = []
     for t in tasks:
         rows.append({
@@ -265,9 +328,10 @@ def display_photos_grid(photos, title=None):
 GRADE_OPTIONS = ["C등급", "B등급", "A등급", "공장장", "본부장", "대표이사"]
 
 # =========================================================
-# 7) 메인 화면: 탭 구성
+# 7) 메인 화면: 탭 구성 (수정됨)
 # =========================================================
-tabs = st.tabs(["📊 대시보드", "📝 문제등록", "📅 계획수립", "🛠️ 조치입력", "🔍 조회/관리"])
+# [수정] 탭 목록에 '실별온도관리' 추가
+tabs = st.tabs(["📊 대시보드", "🌡️ 실별온도관리", "📝 문제등록", "📅 계획수립", "🛠️ 조치입력", "🔍 조회/관리"])
 
 with tabs[0]: # 대시보드
     raw_tasks = fetch_tasks_all()
@@ -352,19 +416,15 @@ with tabs[0]: # 대시보드
                 st.markdown("##### 📋 장소별 상세 집계")
                 st.dataframe(loc_stats.rename(columns={'공정/장소': '장소'}), use_container_width=True, hide_index=True, height=300)
 
-            # [수정] 등급별 섹션 (그래프 + 표 분할 배치)
             st.divider()
             
-            # 등급별 데이터 집계
             grade_stats = filtered_df.groupby('grade').agg(
                 발생건수=('id', 'count'), 
                 완료건수=('status', lambda x: (x == '완료').sum())
             ).reset_index()
             grade_stats['개선율'] = (grade_stats['완료건수'] / grade_stats['발생건수'] * 100).round(1)
             
-            # 등급 정렬을 위한 로직
             sort_order = ["C등급", "B등급", "A등급", "공장장", "본부장", "대표이사", "미지정"]
-            # 데이터프레임을 정렬 순서대로 정리
             grade_stats['grade'] = pd.Categorical(grade_stats['grade'], categories=sort_order, ordered=True)
             grade_stats = grade_stats.sort_values('grade')
 
@@ -396,8 +456,124 @@ with tabs[0]: # 대시보드
                     height=300
                 )
 
+# =========================================================
+# [NEW TAB] 실별 온도관리 기능
+# =========================================================
+with tabs[1]:
+    st.subheader("🌡️ 실별 온도/습도 관리")
+    
+    # 1. 데이터 가져오기 (최근 30일치까지)
+    df_logs = fetch_sensor_logs(days=30)
+    
+    if df_logs.empty:
+        st.info("📊 수집된 센서 데이터가 없습니다. (센서 연동 스크립트가 실행 중인지 확인하세요)")
+    else:
+        # 2. 필터링 UI
+        # 실 목록 가져오기 (설정 기반)
+        room_list = sorted(list(set(SENSOR_CONFIG.values())))
+        
+        # 상단 현황판 (최신 데이터 기준)
+        st.markdown("#### 🏢 실별 현재 상태")
+        latest_df = df_logs.sort_values('created_at').groupby('room_name').tail(1)
+        
+        # 카드로 보여주기 (3열 배치)
+        cols = st.columns(4)
+        for idx, room in enumerate(room_list):
+            row = latest_df[latest_df['room_name'] == room]
+            with cols[idx % 4]:
+                icon = ROOM_ICONS.get(room, "🏢")
+                if not row.empty:
+                    temp = row.iloc[0]['temperature']
+                    humid = row.iloc[0]['humidity']
+                    time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - row.iloc[0]['created_at']).total_seconds() / 60
+                    
+                    # 온도 색상 (30도 넘으면 빨강)
+                    temp_color = "temp-high" if temp >= 30 else ""
+                    
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-title">{icon} {room}</div>
+                        <div class="metric-value {temp_color}">{temp:.1f}℃</div>
+                        <div style="font-size: 1.1rem; color: #4dabf7;">💧 {humid:.1f}%</div>
+                        <div class="metric-sub">{int(time_diff)}분 전 갱신</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="metric-card" style="opacity: 0.6;">
+                        <div class="metric-title">{icon} {room}</div>
+                        <div class="metric-value">-</div>
+                        <div class="metric-sub">데이터 없음</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+        
+        st.divider()
+        
+        # 3. 상세 분석 그래프
+        st.markdown("#### 📈 상세 분석")
+        
+        col_f1, col_f2 = st.columns([1, 2])
+        sel_room = col_f1.selectbox("분석할 장소 선택", room_list)
+        
+        # 기간 선택
+        sel_range = col_f2.radio("기간 보기", ["24시간", "1주일", "1개월", "전체"], horizontal=True, index=0)
+        
+        # 데이터 필터링
+        target_df = df_logs[df_logs['room_name'] == sel_room].copy()
+        
+        now = datetime.now(pytz.timezone('Asia/Seoul'))
+        if sel_range == "24시간":
+            target_df = target_df[target_df['created_at'] >= now - timedelta(hours=24)]
+            time_unit = 'hours'
+            x_format = '%H:%M'
+        elif sel_range == "1주일":
+            target_df = target_df[target_df['created_at'] >= now - timedelta(days=7)]
+            time_unit = 'yearmonthdate'
+            x_format = '%m-%d'
+        elif sel_range == "1개월":
+            target_df = target_df[target_df['created_at'] >= now - timedelta(days=30)]
+            time_unit = 'yearmonthdate'
+            x_format = '%m-%d'
+        
+        if target_df.empty:
+            st.warning(f"선택한 기간에 '{sel_room}'의 데이터가 없습니다.")
+        else:
+            # Altair 차트 (온도/습도 이중축)
+            base = alt.Chart(target_df).encode(
+                x=alt.X('created_at:T', title='시간', axis=alt.Axis(format=x_format))
+            )
+            
+            line_temp = base.mark_line(color='#ff6b6b').encode(
+                y=alt.Y('temperature:Q', title='온도 (℃)', scale=alt.Scale(domain=[target_df['temperature'].min()-2, target_df['temperature'].max()+2])),
+                tooltip=['created_at', 'temperature']
+            )
+            
+            line_humid = base.mark_line(color='#4dabf7').encode(
+                y=alt.Y('humidity:Q', title='습도 (%)', scale=alt.Scale(domain=[0, 100])),
+                tooltip=['created_at', 'humidity']
+            )
+            
+            c = alt.layer(line_temp, line_humid).resolve_scale(
+                y='independent'
+            ).properties(height=350)
+            
+            st.altair_chart(c, use_container_width=True)
+            
+            with st.expander(f"{sel_room} 전체 데이터 보기"):
+                st.dataframe(
+                    target_df[['created_at', 'sensor_id', 'temperature', 'humidity', 'status']].sort_values('created_at', ascending=False),
+                    column_config={
+                        "created_at": "측정일시",
+                        "sensor_id": "센서ID",
+                        "temperature": "온도(℃)",
+                        "humidity": "습도(%)",
+                        "status": "상태"
+                    },
+                    use_container_width=True
+                )
 
-with tabs[1]: # 문제 등록
+
+with tabs[2]: # 문제 등록
     st.subheader("📝 문제 등록")
     with st.form("form_register", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
@@ -419,7 +595,7 @@ with tabs[1]: # 문제 등록
                     st.success("저장 완료!")
                 except Exception as e: st.error(f"오류: {e}")
 
-with tabs[2]: # 계획 수립
+with tabs[3]: # 계획 수립
     st.subheader("📅 계획 수립")
     tasks = fetch_tasks_all()
     tasks = [t for t in tasks if t['status'] != '완료'] 
@@ -454,7 +630,7 @@ with tabs[2]: # 계획 수립
                 st.success("완료")
                 st.rerun()
 
-with tabs[3]: # 조치 입력
+with tabs[4]: # 조치 입력
     st.subheader("🛠️ 조치 결과 입력")
     all_tasks = fetch_tasks_all()
     target_tasks = [t for t in all_tasks if t['status'] != '완료']
@@ -512,7 +688,7 @@ with tabs[3]: # 조치 입력
                     st.success("완료 처리되었습니다.")
                     st.rerun()
 
-with tabs[4]: # 조회/관리
+with tabs[5]: # 조회/관리
     st.subheader("🔍 통합 조회 및 관리")
     c1, c2, c3 = st.columns([1, 1, 2])
     status_filter = c1.selectbox("상태", ["전체", "진행중", "완료"])
