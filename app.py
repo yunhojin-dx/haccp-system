@@ -6,7 +6,7 @@ import math
 import base64
 import tempfile
 from datetime import date, datetime, timedelta
-import pytz # 시간대 변환을 위해 추가
+import pytz 
 
 import requests
 import pandas as pd
@@ -86,7 +86,7 @@ def get_supabase():
 sb = get_supabase()
 
 # =========================================================
-# [설정] 센서 - 장소 매핑 설정 (여기서 이름을 바꾸세요!)
+# [설정] 센서 - 장소 매핑 설정
 # =========================================================
 SENSOR_CONFIG = {
     "1호기": "쌀창고",
@@ -107,7 +107,7 @@ ROOM_ICONS = {
 }
 
 # =========================================================
-# 2) 핵심 로직 (기존 + 온도데이터 추가)
+# 2) 핵심 로직
 # =========================================================
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_tasks_all() -> list[dict]:
@@ -169,7 +169,6 @@ def fetch_sensor_logs(days=7) -> pd.DataFrame:
         df['created_at'] = df['created_at'].dt.tz_convert('Asia/Seoul')
         
         # 'place' 컬럼(예: 1호기)을 'room_name'(예: 쌀창고)으로 매핑
-        # 센서 데이터의 'place'에는 '1호기', '2호기' 등의 값이 들어있다고 가정
         df['sensor_id'] = df['place'] # 원래 ID 보존
         df['room_name'] = df['place'].map(SENSOR_CONFIG).fillna("미분류")
         
@@ -252,7 +251,6 @@ def download_image_to_temp(url: str) -> str | None:
     except: return None
 
 def export_excel(tasks: list[dict]) -> bytes:
-    # (기존 코드 유지)
     rows = []
     for t in tasks:
         rows.append({
@@ -328,10 +326,10 @@ def display_photos_grid(photos, title=None):
 GRADE_OPTIONS = ["C등급", "B등급", "A등급", "공장장", "본부장", "대표이사"]
 
 # =========================================================
-# 7) 메인 화면: 탭 구성 (수정됨)
+# 7) 메인 화면: 탭 구성
 # =========================================================
-# [수정] 탭 목록에 '실별온도관리' 추가
-tabs = st.tabs(["📊 대시보드", "🌡️ 실별온도관리", "📝 문제등록", "📅 계획수립", "🛠️ 조치입력", "🔍 조회/관리"])
+# [수정] 탭 순서 변경: '실별온도관리'를 맨 마지막으로 이동
+tabs = st.tabs(["📊 대시보드", "📝 문제등록", "📅 계획수립", "🛠️ 조치입력", "🔍 조회/관리", "🌡️ 실별온도관리"])
 
 with tabs[0]: # 대시보드
     raw_tasks = fetch_tasks_all()
@@ -456,10 +454,192 @@ with tabs[0]: # 대시보드
                     height=300
                 )
 
+with tabs[1]: # 문제 등록 (순서 변경됨)
+    st.subheader("📝 문제 등록")
+    with st.form("form_register", clear_on_submit=True):
+        c1, c2, c3, c4 = st.columns(4)
+        issue_date = c1.date_input("일시", value=date.today())
+        location = c2.text_input("장소", placeholder="예: 포장실")
+        reporter = c3.text_input("발견자", placeholder="예: 홍길동")
+        grade = c4.selectbox("관리 등급", GRADE_OPTIONS)
+        
+        issue_text = st.text_area("내용", placeholder="내용 입력", height=100)
+        photos = st.file_uploader("사진 (개선 전)", type=["jpg", "png", "webp"], accept_multiple_files=True)
+        if st.form_submit_button("등록", type="primary"):
+            if not (location and reporter and issue_text):
+                st.error("필수 항목 누락")
+            else:
+                try:
+                    tid = insert_task(issue_date, location, issue_text, reporter, grade)
+                    if photos:
+                        for f in photos: upload_photo(tid, f, photo_type="BEFORE")
+                    st.success("저장 완료!")
+                except Exception as e: st.error(f"오류: {e}")
+
+with tabs[2]: # 계획 수립 (순서 변경됨)
+    st.subheader("📅 계획 수립")
+    tasks = fetch_tasks_all()
+    tasks = [t for t in tasks if t['status'] != '완료'] 
+    if not tasks: st.info("대상 과제 없음")
+    else:
+        opts = [f"[{t.get('grade') or '-'}] {t['issue_date']} | {t['location']} - {t['issue_text'][:15]}..." for t in tasks]
+        sel = st.selectbox("과제 선택", opts)
+        t = tasks[opts.index(sel)]
+        
+        st.markdown(f"### <span class='grade-badge'>{t.get('grade') or '미지정'}</span> {t['location']}", unsafe_allow_html=True)
+        st.info(f"내용: {t['issue_text']}")
+        display_photos_grid(t.get('photos_before', []), "📸 개선 전 사진")
+        
+        with st.form("form_plan"):
+            st.markdown("**✏️ 내용 수정**")
+            new_issue_text = st.text_area("개선 필요사항 (내용 수정 가능)", value=t['issue_text'], height=100)
+            
+            c1, c2, c3 = st.columns(3)
+            assignee = c1.text_input("담당자", value=t.get('assignee') or "")
+            plan_due = c2.date_input("계획일정", value=pd.to_datetime(t.get('plan_due')).date() if t.get('plan_due') else date.today())
+            new_grade = c3.selectbox("등급 수정", GRADE_OPTIONS, index=GRADE_OPTIONS.index(t.get('grade')) if t.get('grade') in GRADE_OPTIONS else 0)
+            
+            plan_text = st.text_area("계획내용", value=t.get('plan_text') or "")
+            if st.form_submit_button("저장"):
+                update_task(t['id'], {
+                    "issue_text": new_issue_text, 
+                    "assignee": assignee, 
+                    "plan_due": str(plan_due), 
+                    "plan_text": plan_text,
+                    "grade": new_grade
+                })
+                st.success("완료")
+                st.rerun()
+
+with tabs[3]: # 조치 입력 (순서 변경됨)
+    st.subheader("🛠️ 조치 결과 입력")
+    all_tasks = fetch_tasks_all()
+    target_tasks = [t for t in all_tasks if t['status'] != '완료']
+
+    if not target_tasks:
+        st.info("조치할 미완료 과제가 없습니다.")
+        if st.button("새로고침"): clear_cache(); st.rerun()
+    else:
+        assignees = sorted(list(set([t.get('assignee') or "미지정" for t in target_tasks])))
+        locations = sorted(list(set([t.get('location') or "미분류" for t in target_tasks])))
+        
+        c_filter1, c_filter2 = st.columns(2)
+        sel_assignee = c_filter1.selectbox("👤 담당자 필터", ["전체"] + assignees)
+        sel_location = c_filter2.selectbox("🏢 장소 필터", ["전체"] + locations)
+            
+        filtered_tasks = target_tasks
+        if sel_assignee != "전체":
+            if sel_assignee == "미지정": filtered_tasks = [t for t in filtered_tasks if not t.get('assignee')]
+            else: filtered_tasks = [t for t in filtered_tasks if t.get('assignee') == sel_assignee]
+        if sel_location != "전체":
+             filtered_tasks = [t for t in filtered_tasks if (t.get('location') or "미분류") == sel_location]
+
+        if not filtered_tasks: st.warning("조건에 맞는 과제가 없습니다.")
+        else:
+            task_map = {f"[{t.get('grade') or '-'}] {t['issue_date']} {t['location']} - {t['issue_text'][:15]}...": t for t in filtered_tasks}
+            sel_label = st.selectbox("대상 과제 선택", list(task_map.keys()))
+            t = task_map[sel_label]
+            
+            st.divider()
+            st.markdown(f"### <span class='grade-badge'>{t.get('grade') or '미지정'}</span> {t['location']}", unsafe_allow_html=True)
+            st.info(f"📌 문제 내용: {t['issue_text']}")
+            
+            plan_txt = t.get('plan_text')
+            if plan_txt: st.success(f"📅 계획 내용: {plan_txt}")
+            else: st.warning("📅 계획 내용: 수립된 계획이 없습니다.")
+            
+            c_p1, c_p2 = st.columns(2)
+            with c_p1: display_photos_grid(t.get('photos_before', []), "🔴 개선 전")
+            with c_p2: display_photos_grid(t.get('photos_after', []), "🟢 개선 후 (현재)")
+
+            with st.expander("➕ 개선 완료(After) 사진 추가"):
+                act_photos = st.file_uploader("사진 업로드", type=["jpg", "png", "webp"], accept_multiple_files=True, key=f"act_up_{t['id']}")
+                if act_photos and st.button("사진 저장", key=f"btn_act_{t['id']}"):
+                    for f in act_photos: upload_photo(t['id'], f, photo_type="AFTER")
+                    st.success("등록됨")
+                    st.rerun()
+            
+            st.divider()
+            with st.form("form_act"):
+                action_text = st.text_area("조치내용", value=t.get('action_text') or "")
+                action_done_date = st.date_input("완료일", value=pd.to_datetime(t.get('action_done_date')).date() if t.get('action_done_date') else date.today())
+                if st.form_submit_button("조치 완료 처리", type="primary"):
+                    update_task(t['id'], {"action_text": action_text, "action_done_date": str(action_done_date), "status": "완료"})
+                    st.balloons()
+                    st.success("완료 처리되었습니다.")
+                    st.rerun()
+
+with tabs[4]: # 조회/관리 (순서 변경됨)
+    st.subheader("🔍 통합 조회 및 관리")
+    c1, c2, c3 = st.columns([1, 1, 2])
+    status_filter = c1.selectbox("상태", ["전체", "진행중", "완료"])
+    loc_filter = c2.text_input("장소 검색")
+    txt_filter = c3.text_input("내용 검색")
+    
+    tasks = fetch_tasks_all()
+    filtered = []
+    for t in tasks:
+        if status_filter != "전체" and t['status'] != status_filter: continue
+        if loc_filter and loc_filter not in (t['location'] or ""): continue
+        if txt_filter and txt_filter not in (t['issue_text'] or ""): continue
+        filtered.append(t)
+        
+    if not filtered: st.warning("데이터가 없습니다.")
+    else:
+        df_list = pd.DataFrame(filtered)
+        df_disp = df_list[['issue_date', 'grade', 'location', 'issue_text', 'status', 'action_done_date']].copy()
+        df_disp.columns = ['일시', '등급', '장소', '내용', '상태', '완료일']
+        
+        st.caption("목록을 클릭하면 상세 내용을 볼 수 있습니다.")
+        selection = st.dataframe(df_disp, use_container_width=True, hide_index=True, height=250, on_select="rerun", selection_mode="single-row")
+        
+        if selection.selection.rows:
+            target = filtered[selection.selection.rows[0]]
+            st.divider()
+            st.markdown(f"#### 🔧 상세 관리 : <span class='grade-badge'>{target.get('grade') or '-'}</span> {target['location']}", unsafe_allow_html=True)
+            
+            c_l, c_r = st.columns([3, 1])
+            c_l.info(f"내용: {target['issue_text']} | 담당: {target.get('assignee') or '-'} | 완료: {target.get('action_done_date') or '-'}")
+            if c_r.button("🗑️ 삭제하기", type="primary"):
+                delete_task_entirely(target['id'], target.get('photos'))
+                st.success("삭제됨")
+                st.rerun()
+
+            with st.expander("🏷️ 등급 수정 (미지정 건 처리용)"):
+                current_grade = target.get('grade') or "미지정"
+                idx = GRADE_OPTIONS.index(current_grade) if current_grade in GRADE_OPTIONS else 0
+                new_grade_sel = st.selectbox("등급 변경", GRADE_OPTIONS, index=idx, key="up_grade_sel")
+                if st.button("등급 저장", key="btn_up_grade"):
+                    update_task(target['id'], {"grade": new_grade_sel})
+                    st.success("등급이 수정되었습니다.")
+                    st.rerun()
+
+            display_photos_grid(target.get('photos_before', []), "🔴 개선 전")
+            display_photos_grid(target.get('photos_after', []), "🟢 개선 후")
+            
+            all_p = target.get('photos', [])
+            if all_p:
+                with st.expander("사진 삭제 모드"):
+                    cols = st.columns(4)
+                    for i, p in enumerate(all_p):
+                        with cols[i%4]:
+                            ptype = "🟢후" if "/AFTER_" in p.get('storage_path', '') else "🔴전"
+                            st.image(p['public_url'], caption=ptype, width=100)
+                            if st.button("삭제", key=f"del_{p['photo_id']}"): delete_photo(p['photo_id'], p['storage_path']); st.rerun()
+            
+            c_add1, c_add2 = st.columns([1, 3])
+            add_type = c_add1.radio("추가할 사진 타입", ["개선전(BEFORE)", "개선후(AFTER)"], horizontal=True)
+            new_p = c_add2.file_uploader("사진 추가", accept_multiple_files=True, key="add_p_man")
+            if new_p and c_add2.button("업로드"):
+                pt = "AFTER" if "개선후" in add_type else "BEFORE"
+                for f in new_p: upload_photo(target['id'], f, photo_type=pt)
+                st.success("완료")
+                st.rerun()
+
 # =========================================================
-# [NEW TAB] 실별 온도관리 기능
+# [Moved to Last Tab] 실별 온도관리 기능
 # =========================================================
-with tabs[1]:
+with tabs[5]:
     st.subheader("🌡️ 실별 온도/습도 관리")
     
     # 1. 데이터 가져오기 (최근 30일치까지)
@@ -571,186 +751,3 @@ with tabs[1]:
                     },
                     use_container_width=True
                 )
-
-
-with tabs[2]: # 문제 등록
-    st.subheader("📝 문제 등록")
-    with st.form("form_register", clear_on_submit=True):
-        c1, c2, c3, c4 = st.columns(4)
-        issue_date = c1.date_input("일시", value=date.today())
-        location = c2.text_input("장소", placeholder="예: 포장실")
-        reporter = c3.text_input("발견자", placeholder="예: 홍길동")
-        grade = c4.selectbox("관리 등급", GRADE_OPTIONS)
-        
-        issue_text = st.text_area("내용", placeholder="내용 입력", height=100)
-        photos = st.file_uploader("사진 (개선 전)", type=["jpg", "png", "webp"], accept_multiple_files=True)
-        if st.form_submit_button("등록", type="primary"):
-            if not (location and reporter and issue_text):
-                st.error("필수 항목 누락")
-            else:
-                try:
-                    tid = insert_task(issue_date, location, issue_text, reporter, grade)
-                    if photos:
-                        for f in photos: upload_photo(tid, f, photo_type="BEFORE")
-                    st.success("저장 완료!")
-                except Exception as e: st.error(f"오류: {e}")
-
-with tabs[3]: # 계획 수립
-    st.subheader("📅 계획 수립")
-    tasks = fetch_tasks_all()
-    tasks = [t for t in tasks if t['status'] != '완료'] 
-    if not tasks: st.info("대상 과제 없음")
-    else:
-        opts = [f"[{t.get('grade') or '-'}] {t['issue_date']} | {t['location']} - {t['issue_text'][:15]}..." for t in tasks]
-        sel = st.selectbox("과제 선택", opts)
-        t = tasks[opts.index(sel)]
-        
-        st.markdown(f"### <span class='grade-badge'>{t.get('grade') or '미지정'}</span> {t['location']}", unsafe_allow_html=True)
-        st.info(f"내용: {t['issue_text']}")
-        display_photos_grid(t.get('photos_before', []), "📸 개선 전 사진")
-        
-        with st.form("form_plan"):
-            st.markdown("**✏️ 내용 수정**")
-            new_issue_text = st.text_area("개선 필요사항 (내용 수정 가능)", value=t['issue_text'], height=100)
-            
-            c1, c2, c3 = st.columns(3)
-            assignee = c1.text_input("담당자", value=t.get('assignee') or "")
-            plan_due = c2.date_input("계획일정", value=pd.to_datetime(t.get('plan_due')).date() if t.get('plan_due') else date.today())
-            new_grade = c3.selectbox("등급 수정", GRADE_OPTIONS, index=GRADE_OPTIONS.index(t.get('grade')) if t.get('grade') in GRADE_OPTIONS else 0)
-            
-            plan_text = st.text_area("계획내용", value=t.get('plan_text') or "")
-            if st.form_submit_button("저장"):
-                update_task(t['id'], {
-                    "issue_text": new_issue_text, 
-                    "assignee": assignee, 
-                    "plan_due": str(plan_due), 
-                    "plan_text": plan_text,
-                    "grade": new_grade
-                })
-                st.success("완료")
-                st.rerun()
-
-with tabs[4]: # 조치 입력
-    st.subheader("🛠️ 조치 결과 입력")
-    all_tasks = fetch_tasks_all()
-    target_tasks = [t for t in all_tasks if t['status'] != '완료']
-
-    if not target_tasks:
-        st.info("조치할 미완료 과제가 없습니다.")
-        if st.button("새로고침"): clear_cache(); st.rerun()
-    else:
-        assignees = sorted(list(set([t.get('assignee') or "미지정" for t in target_tasks])))
-        locations = sorted(list(set([t.get('location') or "미분류" for t in target_tasks])))
-        
-        c_filter1, c_filter2 = st.columns(2)
-        sel_assignee = c_filter1.selectbox("👤 담당자 필터", ["전체"] + assignees)
-        sel_location = c_filter2.selectbox("🏢 장소 필터", ["전체"] + locations)
-            
-        filtered_tasks = target_tasks
-        if sel_assignee != "전체":
-            if sel_assignee == "미지정": filtered_tasks = [t for t in filtered_tasks if not t.get('assignee')]
-            else: filtered_tasks = [t for t in filtered_tasks if t.get('assignee') == sel_assignee]
-        if sel_location != "전체":
-             filtered_tasks = [t for t in filtered_tasks if (t.get('location') or "미분류") == sel_location]
-
-        if not filtered_tasks: st.warning("조건에 맞는 과제가 없습니다.")
-        else:
-            task_map = {f"[{t.get('grade') or '-'}] {t['issue_date']} {t['location']} - {t['issue_text'][:15]}...": t for t in filtered_tasks}
-            sel_label = st.selectbox("대상 과제 선택", list(task_map.keys()))
-            t = task_map[sel_label]
-            
-            st.divider()
-            st.markdown(f"### <span class='grade-badge'>{t.get('grade') or '미지정'}</span> {t['location']}", unsafe_allow_html=True)
-            st.info(f"📌 문제 내용: {t['issue_text']}")
-            
-            plan_txt = t.get('plan_text')
-            if plan_txt: st.success(f"📅 계획 내용: {plan_txt}")
-            else: st.warning("📅 계획 내용: 수립된 계획이 없습니다.")
-            
-            c_p1, c_p2 = st.columns(2)
-            with c_p1: display_photos_grid(t.get('photos_before', []), "🔴 개선 전")
-            with c_p2: display_photos_grid(t.get('photos_after', []), "🟢 개선 후 (현재)")
-
-            with st.expander("➕ 개선 완료(After) 사진 추가"):
-                act_photos = st.file_uploader("사진 업로드", type=["jpg", "png", "webp"], accept_multiple_files=True, key=f"act_up_{t['id']}")
-                if act_photos and st.button("사진 저장", key=f"btn_act_{t['id']}"):
-                    for f in act_photos: upload_photo(t['id'], f, photo_type="AFTER")
-                    st.success("등록됨")
-                    st.rerun()
-            
-            st.divider()
-            with st.form("form_act"):
-                action_text = st.text_area("조치내용", value=t.get('action_text') or "")
-                action_done_date = st.date_input("완료일", value=pd.to_datetime(t.get('action_done_date')).date() if t.get('action_done_date') else date.today())
-                if st.form_submit_button("조치 완료 처리", type="primary"):
-                    update_task(t['id'], {"action_text": action_text, "action_done_date": str(action_done_date), "status": "완료"})
-                    st.balloons()
-                    st.success("완료 처리되었습니다.")
-                    st.rerun()
-
-with tabs[5]: # 조회/관리
-    st.subheader("🔍 통합 조회 및 관리")
-    c1, c2, c3 = st.columns([1, 1, 2])
-    status_filter = c1.selectbox("상태", ["전체", "진행중", "완료"])
-    loc_filter = c2.text_input("장소 검색")
-    txt_filter = c3.text_input("내용 검색")
-    
-    tasks = fetch_tasks_all()
-    filtered = []
-    for t in tasks:
-        if status_filter != "전체" and t['status'] != status_filter: continue
-        if loc_filter and loc_filter not in (t['location'] or ""): continue
-        if txt_filter and txt_filter not in (t['issue_text'] or ""): continue
-        filtered.append(t)
-        
-    if not filtered: st.warning("데이터가 없습니다.")
-    else:
-        df_list = pd.DataFrame(filtered)
-        df_disp = df_list[['issue_date', 'grade', 'location', 'issue_text', 'status', 'action_done_date']].copy()
-        df_disp.columns = ['일시', '등급', '장소', '내용', '상태', '완료일']
-        
-        st.caption("목록을 클릭하면 상세 내용을 볼 수 있습니다.")
-        selection = st.dataframe(df_disp, use_container_width=True, hide_index=True, height=250, on_select="rerun", selection_mode="single-row")
-        
-        if selection.selection.rows:
-            target = filtered[selection.selection.rows[0]]
-            st.divider()
-            st.markdown(f"#### 🔧 상세 관리 : <span class='grade-badge'>{target.get('grade') or '-'}</span> {target['location']}", unsafe_allow_html=True)
-            
-            c_l, c_r = st.columns([3, 1])
-            c_l.info(f"내용: {target['issue_text']} | 담당: {target.get('assignee') or '-'} | 완료: {target.get('action_done_date') or '-'}")
-            if c_r.button("🗑️ 삭제하기", type="primary"):
-                delete_task_entirely(target['id'], target.get('photos'))
-                st.success("삭제됨")
-                st.rerun()
-
-            with st.expander("🏷️ 등급 수정 (미지정 건 처리용)"):
-                current_grade = target.get('grade') or "미지정"
-                idx = GRADE_OPTIONS.index(current_grade) if current_grade in GRADE_OPTIONS else 0
-                new_grade_sel = st.selectbox("등급 변경", GRADE_OPTIONS, index=idx, key="up_grade_sel")
-                if st.button("등급 저장", key="btn_up_grade"):
-                    update_task(target['id'], {"grade": new_grade_sel})
-                    st.success("등급이 수정되었습니다.")
-                    st.rerun()
-
-            display_photos_grid(target.get('photos_before', []), "🔴 개선 전")
-            display_photos_grid(target.get('photos_after', []), "🟢 개선 후")
-            
-            all_p = target.get('photos', [])
-            if all_p:
-                with st.expander("사진 삭제 모드"):
-                    cols = st.columns(4)
-                    for i, p in enumerate(all_p):
-                        with cols[i%4]:
-                            ptype = "🟢후" if "/AFTER_" in p.get('storage_path', '') else "🔴전"
-                            st.image(p['public_url'], caption=ptype, width=100)
-                            if st.button("삭제", key=f"del_{p['photo_id']}"): delete_photo(p['photo_id'], p['storage_path']); st.rerun()
-            
-            c_add1, c_add2 = st.columns([1, 3])
-            add_type = c_add1.radio("추가할 사진 타입", ["개선전(BEFORE)", "개선후(AFTER)"], horizontal=True)
-            new_p = c_add2.file_uploader("사진 추가", accept_multiple_files=True, key="add_p_man")
-            if new_p and c_add2.button("업로드"):
-                pt = "AFTER" if "개선후" in add_type else "BEFORE"
-                for f in new_p: upload_photo(target['id'], f, photo_type=pt)
-                st.success("완료")
-                st.rerun()
