@@ -647,31 +647,27 @@ with tabs[4]: # 조회/관리
                 st.rerun()
 
 # =========================================================
-# [마지막 탭] 실별 온도관리 기능 (팝업 설정창 적용 버전)
+# [마지막 탭] 실별 온도관리 기능 (이름 크게 + 팝업 설정)
 # =========================================================
 with tabs[5]:
     # ------------------------------------------------------------------
     # 0. 데이터 준비 (설정값 로드)
     # ------------------------------------------------------------------
-    # 세션에 저장된 설정이 없으면 기본값(ALARM_CONFIG)으로 초기화
     if "alarm_df" not in st.session_state:
         data_list = []
         for room, (min_v, max_v) in ALARM_CONFIG.items():
             if room != "default": 
                 data_list.append({"장소": room, "최저온도(℃)": min_v, "최고온도(℃)": max_v})
         
-        # 순서 정렬
         data_list.sort(key=lambda x: ROOM_ORDER.index(x["장소"]) if x["장소"] in ROOM_ORDER else 999)
         st.session_state.alarm_df = pd.DataFrame(data_list)
 
     # ------------------------------------------------------------------
-    # 1. 팝업창(Dialog) 함수 정의
+    # 1. 팝업창(Dialog) 함수
     # ------------------------------------------------------------------
     @st.dialog("⚙️ 정상 온도 범위 설정")
     def open_setting_popup():
         st.caption("각 장소별 정상 온도 범위를 수정하세요.")
-        
-        # 데이터 에디터 표시
         edited = st.data_editor(
             st.session_state.alarm_df,
             column_config={
@@ -679,35 +675,20 @@ with tabs[5]:
                 "최저온도(℃)": st.column_config.NumberColumn("Min", min_value=-10, max_value=50, step=0.5, format="%.1f"),
                 "최고온도(℃)": st.column_config.NumberColumn("Max", min_value=-10, max_value=60, step=0.5, format="%.1f"),
             },
-            hide_index=True,
-            use_container_width=True,
-            num_rows="fixed",
-            key="popup_editor"
+            hide_index=True, use_container_width=True, num_rows="fixed", key="popup_editor"
         )
-        
-        # 저장 버튼
         if st.button("💾 저장하고 닫기", type="primary", use_container_width=True):
             st.session_state.alarm_df = edited
-            st.rerun() # 화면 새로고침
+            st.rerun()
 
     # ------------------------------------------------------------------
-    # 2. 메인 화면 구성 (헤더 + 설정버튼)
+    # 2. 메인 화면 구성
     # ------------------------------------------------------------------
-    # 제목 옆에 버튼을 두기 위해 컬럼 분할
     col_head, col_btn = st.columns([6, 1], vertical_alignment="center")
-    
-    with col_head:
-        st.subheader("🌡️ 실별 온도/습도 관리")
-        
+    with col_head: st.subheader("🌡️ 실별 온도/습도 관리")
     with col_btn:
-        # 이 버튼을 누르면 팝업이 뜹니다
-        if st.button("⚙️ 설정", use_container_width=True):
-            open_setting_popup()
+        if st.button("⚙️ 설정", use_container_width=True): open_setting_popup()
 
-    # ------------------------------------------------------------------
-    # 3. 현재 설정값 적용 및 데이터 조회
-    # ------------------------------------------------------------------
-    # 현재 적용할 설정값 계산 (Dataframe -> Dict)
     ACTIVE_CONFIG = ALARM_CONFIG.copy()
     for index, row in st.session_state.alarm_df.iterrows():
         ACTIVE_CONFIG[row["장소"]] = (row["최저온도(℃)"], row["최고온도(℃)"])
@@ -715,12 +696,12 @@ with tabs[5]:
     df_logs = fetch_sensor_logs(days=30)
     
     if df_logs.empty:
-        st.info("📊 수집된 센서 데이터가 없습니다. (센서 연동 스크립트가 실행 중인지 확인하세요)")
+        st.info("📊 수집된 센서 데이터가 없습니다.")
     else:
         available_rooms = set(SENSOR_CONFIG.values())
         room_list = [r for r in ROOM_ORDER if r in available_rooms]
         
-        st.markdown("#### 🏢 실별 현재 상태 (평균 + 개별)")
+        st.markdown("#### 🏢 실별 현재 상태")
         
         latest_sensors = df_logs.sort_values('created_at').groupby('sensor_id').tail(1)
         cols = st.columns(4)
@@ -729,7 +710,6 @@ with tabs[5]:
             room_sensors = latest_sensors[latest_sensors['room_name'] == room]
             with cols[idx % 4]:
                 icon = ROOM_ICONS.get(room, "🏢")
-                # ★ 저장된 설정값(ACTIVE_CONFIG) 사용
                 limit_min, limit_max = ACTIVE_CONFIG.get(room, ACTIVE_CONFIG["default"])
                 
                 if not room_sensors.empty:
@@ -755,17 +735,21 @@ with tabs[5]:
                             
                         details_html += f"""<div style="display:flex; justify-content:space-between; font-size:0.85rem; color:{text_color}; font-weight:{weight}; margin-top:2px;"><span>{s_name}</span><span>{icon_alert} {s_temp:.1f}℃</span></div>"""
                     
+                    # [디자인 수정] 경보 시 제목도 빨간색 + 글자 크기 대폭 확대
                     if room_warning:
-                        header_color = "#e03131"
+                        header_color = "#e03131" # 빨강
                     else:
-                        header_color = "#212529"
+                        header_color = "#212529" # 진한 검정 (기존 회색보다 훨씬 진하게)
                     
                     last_time = room_sensors['created_at'].max()
                     time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - last_time).total_seconds() / 60
                     
                     st.markdown(f"""
 <div class="metric-card" style="border-top: 4px solid {header_color};">
-    <div class="metric-title">{icon} {room}</div>
+    <div class="metric-title" style="font-size: 1.5rem; font-weight: 800; color: {header_color}; margin-bottom: 8px;">
+        {icon} {room}
+    </div>
+    
     <div class="metric-value" style="color:{header_color}">{avg_temp:.1f}℃</div>
     <div style="font-size: 0.8rem; color: #868e96;">기준: {limit_min}~{limit_max}℃</div>
     <div style="font-size: 1.0rem; color: #4dabf7; margin-bottom:10px;">💧 {avg_humid:.1f}%</div>
@@ -778,7 +762,7 @@ with tabs[5]:
                 else:
                     st.markdown(f"""
 <div class="metric-card" style="opacity: 0.6;">
-    <div class="metric-title">{icon} {room}</div>
+    <div class="metric-title" style="font-size: 1.4rem; font-weight: 800; color: #adb5bd;">{icon} {room}</div>
     <div class="metric-value">-</div>
     <div class="metric-sub">데이터 없음</div>
 </div>
@@ -792,7 +776,6 @@ with tabs[5]:
         sel_range = col_f2.radio("기간 보기", ["24시간", "1주일", "1개월", "전체"], horizontal=True, index=0)
         
         target_df = df_logs[df_logs['room_name'] == sel_room].copy()
-        # ★ 저장된 설정값(ACTIVE_CONFIG) 사용
         r_min, r_max = ACTIVE_CONFIG.get(sel_room, ACTIVE_CONFIG["default"])
         
         now = datetime.now(pytz.timezone('Asia/Seoul'))
@@ -813,31 +796,20 @@ with tabs[5]:
         else:
             st.caption("ℹ️ **검은색 굵은 선**은 '평균 온도', **연한 색 선**은 '각 센서별 온도'입니다.")
             
-            base = alt.Chart(target_df).encode(
-                x=alt.X('created_at:T', title='시간', axis=alt.Axis(format=x_format))
-            )
+            base = alt.Chart(target_df).encode(x=alt.X('created_at:T', title='시간', axis=alt.Axis(format=x_format)))
             
             lines_individual = base.mark_line(strokeWidth=1, opacity=0.5).encode(
                 y=alt.Y('temperature:Q', title='온도 (℃)', scale=alt.Scale(domain=[0, 50])),
                 color=alt.Color('sensor_id:N', legend=alt.Legend(title="센서명")),
                 tooltip=['created_at', 'sensor_id', 'temperature']
             )
-
-            line_average = base.mark_line(strokeWidth=3, color='#333333').encode(
-                y=alt.Y('mean(temperature):Q')
-            )
-
-            limit_df = pd.DataFrame([
-                {"val": r_max, "type": "상한선", "color": "red"},
-                {"val": r_min, "type": "하한선", "color": "blue"}
-            ])
+            line_average = base.mark_line(strokeWidth=3, color='#333333').encode(y=alt.Y('mean(temperature):Q'))
             
+            limit_df = pd.DataFrame([{"val": r_max, "type": "상한선", "color": "red"}, {"val": r_min, "type": "하한선", "color": "blue"}])
             rules = alt.Chart(limit_df).mark_rule(strokeDash=[4, 4], size=2).encode(
-                y='val:Q',
-                color=alt.Color('type:N', scale=alt.Scale(domain=['상한선', '하한선'], range=['red', 'blue']))
+                y='val:Q', color=alt.Color('type:N', scale=alt.Scale(domain=['상한선', '하한선'], range=['red', 'blue']))
             )
             
             st.altair_chart((lines_individual + line_average + rules).properties(height=350), use_container_width=True)
-            
             with st.expander(f"{sel_room} 전체 데이터 테이블"):
                 st.dataframe(target_df.sort_values('created_at', ascending=False), use_container_width=True)
