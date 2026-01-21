@@ -5,7 +5,7 @@ on:
     - cron: '*/10 * * * *'
   workflow_dispatch:
 
-# ▼▼▼ [핵심] 열쇠를 '맨 위'로 뺐습니다. 이제 무조건 보입니다. ▼▼▼
+# ▼▼▼ [핵심] 열쇠 꾸러미를 '맨 위'로 뺐습니다. (들여쓰기 실수 방지) ▼▼▼
 env:
   TUYA_API_KEY: ${{ secrets.TUYA_API_KEY }}
   TUYA_API_SECRET: ${{ secrets.TUYA_API_SECRET }}
@@ -29,5 +29,4 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: 수집기 실행
-        # env: 여기 있던 걸 맨 위로 올렸으니 이제 맘 편히 실행만 시킵니다.
         run: python collect_once.py
