@@ -647,60 +647,79 @@ with tabs[4]: # 조회/관리
                 st.rerun()
 
 # =========================================================
-# [마지막 탭] 실별 온도관리 기능 (설정값 수정 기능 추가)
+# [마지막 탭] 실별 온도관리 기능 (팝업 설정창 적용 버전)
 # =========================================================
 with tabs[5]:
-    st.subheader("🌡️ 실별 온도/습도 관리")
-    
-    # 1. 데이터 가져오기
-    df_logs = fetch_sensor_logs(days=30)
-    
     # ------------------------------------------------------------------
-    # 🎛️ [설정 패널] 상한/하한값 조정 (데이터프레임 에디터 사용)
+    # 0. 데이터 준비 (설정값 로드)
     # ------------------------------------------------------------------
-    st.markdown("#### ⚙️ 정상 온도 범위 설정")
-    
-    # 현재 설정(ALARM_CONFIG)을 표(DataFrame)로 변환
-    # (session_state를 써서 수정한 값을 기억하게 함)
+    # 세션에 저장된 설정이 없으면 기본값(ALARM_CONFIG)으로 초기화
     if "alarm_df" not in st.session_state:
-        # 딕셔너리를 리스트로 변환
         data_list = []
         for room, (min_v, max_v) in ALARM_CONFIG.items():
-            if room != "default": # default는 숨김
+            if room != "default": 
                 data_list.append({"장소": room, "최저온도(℃)": min_v, "최고온도(℃)": max_v})
         
-        # 순서 정렬 (ROOM_ORDER 기준)
+        # 순서 정렬
         data_list.sort(key=lambda x: ROOM_ORDER.index(x["장소"]) if x["장소"] in ROOM_ORDER else 999)
         st.session_state.alarm_df = pd.DataFrame(data_list)
 
-    # 에디터 출력 (여기서 숫자 수정 가능)
-    edited_df = st.data_editor(
-        st.session_state.alarm_df,
-        column_config={
-            "장소": st.column_config.TextColumn("장소", disabled=True), # 장소명은 수정 불가
-            "최저온도(℃)": st.column_config.NumberColumn("최저(Min)", min_value=-10, max_value=50, step=0.5, format="%.1f"),
-            "최고온도(℃)": st.column_config.NumberColumn("최고(Max)", min_value=-10, max_value=60, step=0.5, format="%.1f"),
-        },
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed" # 행 추가/삭제 불가
-    )
-
-    # 수정된 값을 다시 딕셔너리로 변환하여 적용
-    # (실제 앱에서는 이 값을 DB에 저장해야 영구 반영되지만, 지금은 임시 반영)
-    NEW_ALARM_CONFIG = ALARM_CONFIG.copy()
-    for index, row in edited_df.iterrows():
-        NEW_ALARM_CONFIG[row["장소"]] = (row["최저온도(℃)"], row["최고온도(℃)"])
-    
     # ------------------------------------------------------------------
+    # 1. 팝업창(Dialog) 함수 정의
+    # ------------------------------------------------------------------
+    @st.dialog("⚙️ 정상 온도 범위 설정")
+    def open_setting_popup():
+        st.caption("각 장소별 정상 온도 범위를 수정하세요.")
+        
+        # 데이터 에디터 표시
+        edited = st.data_editor(
+            st.session_state.alarm_df,
+            column_config={
+                "장소": st.column_config.TextColumn("장소", disabled=True),
+                "최저온도(℃)": st.column_config.NumberColumn("Min", min_value=-10, max_value=50, step=0.5, format="%.1f"),
+                "최고온도(℃)": st.column_config.NumberColumn("Max", min_value=-10, max_value=60, step=0.5, format="%.1f"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            key="popup_editor"
+        )
+        
+        # 저장 버튼
+        if st.button("💾 저장하고 닫기", type="primary", use_container_width=True):
+            st.session_state.alarm_df = edited
+            st.rerun() # 화면 새로고침
 
+    # ------------------------------------------------------------------
+    # 2. 메인 화면 구성 (헤더 + 설정버튼)
+    # ------------------------------------------------------------------
+    # 제목 옆에 버튼을 두기 위해 컬럼 분할
+    col_head, col_btn = st.columns([6, 1], vertical_alignment="center")
+    
+    with col_head:
+        st.subheader("🌡️ 실별 온도/습도 관리")
+        
+    with col_btn:
+        # 이 버튼을 누르면 팝업이 뜹니다
+        if st.button("⚙️ 설정", use_container_width=True):
+            open_setting_popup()
+
+    # ------------------------------------------------------------------
+    # 3. 현재 설정값 적용 및 데이터 조회
+    # ------------------------------------------------------------------
+    # 현재 적용할 설정값 계산 (Dataframe -> Dict)
+    ACTIVE_CONFIG = ALARM_CONFIG.copy()
+    for index, row in st.session_state.alarm_df.iterrows():
+        ACTIVE_CONFIG[row["장소"]] = (row["최저온도(℃)"], row["최고온도(℃)"])
+
+    df_logs = fetch_sensor_logs(days=30)
+    
     if df_logs.empty:
         st.info("📊 수집된 센서 데이터가 없습니다. (센서 연동 스크립트가 실행 중인지 확인하세요)")
     else:
         available_rooms = set(SENSOR_CONFIG.values())
         room_list = [r for r in ROOM_ORDER if r in available_rooms]
         
-        st.divider()
         st.markdown("#### 🏢 실별 현재 상태 (평균 + 개별)")
         
         latest_sensors = df_logs.sort_values('created_at').groupby('sensor_id').tail(1)
@@ -710,8 +729,8 @@ with tabs[5]:
             room_sensors = latest_sensors[latest_sensors['room_name'] == room]
             with cols[idx % 4]:
                 icon = ROOM_ICONS.get(room, "🏢")
-                # ★ 수정된 설정값(NEW_ALARM_CONFIG) 사용
-                limit_min, limit_max = NEW_ALARM_CONFIG.get(room, NEW_ALARM_CONFIG["default"])
+                # ★ 저장된 설정값(ACTIVE_CONFIG) 사용
+                limit_min, limit_max = ACTIVE_CONFIG.get(room, ACTIVE_CONFIG["default"])
                 
                 if not room_sensors.empty:
                     avg_temp = room_sensors['temperature'].mean()
@@ -773,8 +792,8 @@ with tabs[5]:
         sel_range = col_f2.radio("기간 보기", ["24시간", "1주일", "1개월", "전체"], horizontal=True, index=0)
         
         target_df = df_logs[df_logs['room_name'] == sel_room].copy()
-        # ★ 수정된 설정값(NEW_ALARM_CONFIG) 사용
-        r_min, r_max = NEW_ALARM_CONFIG.get(sel_room, NEW_ALARM_CONFIG["default"])
+        # ★ 저장된 설정값(ACTIVE_CONFIG) 사용
+        r_min, r_max = ACTIVE_CONFIG.get(sel_room, ACTIVE_CONFIG["default"])
         
         now = datetime.now(pytz.timezone('Asia/Seoul'))
         if sel_range == "24시간":
