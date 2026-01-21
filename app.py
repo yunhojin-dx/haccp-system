@@ -637,47 +637,108 @@ with tabs[4]: # 조회/관리 (순서 변경됨)
                 st.rerun()
 
 # =========================================================
-# [Moved to Last Tab] 실별 온도관리 기능
+# [마지막 탭] 실별 온도관리 기능 (상한/하한 경보 기능 추가)
 # =========================================================
 with tabs[5]:
     st.subheader("🌡️ 실별 온도/습도 관리")
     
-    # 1. 데이터 가져오기 (최근 30일치까지)
+    # ------------------------------------------------------------------
+    # 🚨 [설정] 장소별 정상 온도 범위 (최소값, 최대값)
+    # ------------------------------------------------------------------
+    # 여기에 원하시는 온도를 적으시면 됩니다.
+    ALARM_CONFIG = {
+        "쌀창고": (5.0, 25.0),      # 5도 ~ 25도 사이가 정상
+        "전처리실": (10.0, 30.0),   # 10도 ~ 30도 사이가 정상
+        "양조실": (20.0, 28.0),     # 발효실은 온도가 중요하니 좁게 설정
+        "제품포장실": (10.0, 30.0),
+        "부자재창고": (0.0, 40.0),
+        "default": (0.0, 35.0)      # 설정 안 된 곳 기본값
+    }
+    # ------------------------------------------------------------------
+
+    # 1. 데이터 가져오기
     df_logs = fetch_sensor_logs(days=30)
     
     if df_logs.empty:
         st.info("📊 수집된 센서 데이터가 없습니다. (센서 연동 스크립트가 실행 중인지 확인하세요)")
     else:
-        # 2. 필터링 UI
-        # 실 목록 가져오기 (설정 기반)
-        room_list = sorted(list(set(SENSOR_CONFIG.values())))
+        available_rooms = set(SENSOR_CONFIG.values())
+        room_list = [r for r in ROOM_ORDER if r in available_rooms]
         
-        # 상단 현황판 (최신 데이터 기준)
-        st.markdown("#### 🏢 실별 현재 상태")
-        latest_df = df_logs.sort_values('created_at').groupby('room_name').tail(1)
+        st.markdown("#### 🏢 실별 현재 상태 (자동 경보 시스템)")
         
-        # 카드로 보여주기 (3열 배치)
+        # 범위 안내 문구 보여주기
+        with st.expander("ℹ️ 현재 설정된 정상 온도 범위 보기"):
+            st.json(ALARM_CONFIG)
+        
+        latest_sensors = df_logs.sort_values('created_at').groupby('sensor_id').tail(1)
+        
         cols = st.columns(4)
+        
         for idx, room in enumerate(room_list):
-            row = latest_df[latest_df['room_name'] == room]
+            room_sensors = latest_sensors[latest_sensors['room_name'] == room]
+            
             with cols[idx % 4]:
                 icon = ROOM_ICONS.get(room, "🏢")
-                if not row.empty:
-                    temp = row.iloc[0]['temperature']
-                    humid = row.iloc[0]['humidity']
-                    time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - row.iloc[0]['created_at']).total_seconds() / 60
+                
+                # 해당 장소의 설정값 가져오기 (없으면 기본값)
+                limit_min, limit_max = ALARM_CONFIG.get(room, ALARM_CONFIG["default"])
+                
+                if not room_sensors.empty:
+                    avg_temp = room_sensors['temperature'].mean()
+                    avg_humid = room_sensors['humidity'].mean()
                     
-                    # 온도 색상 (30도 넘으면 빨강)
-                    temp_color = "temp-high" if temp >= 30 else ""
+                    details_html = ""
+                    room_warning = False # 방 전체 경보 여부
                     
+                    for _, row in room_sensors.iterrows():
+                        s_name = row['sensor_id']
+                        s_temp = row['temperature']
+                        
+                        # 🚨 개별 센서 경보 체크 (범위 벗어나면 빨강)
+                        if s_temp < limit_min or s_temp > limit_max:
+                            text_color = "#e03131" # 진한 빨강
+                            weight = "bold"
+                            icon_alert = "🚨"
+                            room_warning = True
+                        else:
+                            text_color = "#555"
+                            weight = "normal"
+                            icon_alert = ""
+                            
+                        details_html += f"""
+                        <div style="display:flex; justify-content:space-between; font-size:0.85rem; color:{text_color}; font-weight:{weight}; margin-top:2px;">
+                            <span>{s_name}</span>
+                            <span>{icon_alert} {s_temp:.1f}℃</span>
+                        </div>
+                        """
+                    
+                    # 평균값 색상 결정 (하나라도 문제 있으면 헤더도 빨갛게)
+                    if room_warning:
+                        header_color = "#e03131"
+                        status_msg = "비정상"
+                    else:
+                        header_color = "#212529"
+                        status_msg = "정상"
+                    
+                    last_time = room_sensors['created_at'].max()
+                    time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - last_time).total_seconds() / 60
+                    
+                    # 카드 출력
                     st.markdown(f"""
-                    <div class="metric-card">
+                    <div class="metric-card" style="border-top: 4px solid {header_color};">
                         <div class="metric-title">{icon} {room}</div>
-                        <div class="metric-value {temp_color}">{temp:.1f}℃</div>
-                        <div style="font-size: 1.1rem; color: #4dabf7;">💧 {humid:.1f}%</div>
-                        <div class="metric-sub">{int(time_diff)}분 전 갱신</div>
+                        <div class="metric-value" style="color:{header_color}">{avg_temp:.1f}℃</div>
+                        <div style="font-size: 0.8rem; color: #868e96;">기준: {limit_min}~{limit_max}℃</div>
+                        <div style="font-size: 1.0rem; color: #4dabf7; margin-bottom:10px;">💧 {avg_humid:.1f}%</div>
+                        
+                        <div style="border-top:1px solid #eee; margin:5px 0; padding-top:5px;"></div>
+                        {details_html}
+                        
+                        <div class="metric-sub" style="margin-top:8px;">{int(time_diff)}분 전 갱신</div>
                     </div>
                     """, unsafe_allow_html=True)
+                    
                 else:
                     st.markdown(f"""
                     <div class="metric-card" style="opacity: 0.6;">
@@ -688,66 +749,53 @@ with tabs[5]:
                     """, unsafe_allow_html=True)
         
         st.divider()
-        
-        # 3. 상세 분석 그래프
         st.markdown("#### 📈 상세 분석")
         
         col_f1, col_f2 = st.columns([1, 2])
         sel_room = col_f1.selectbox("분석할 장소 선택", room_list)
-        
-        # 기간 선택
         sel_range = col_f2.radio("기간 보기", ["24시간", "1주일", "1개월", "전체"], horizontal=True, index=0)
         
-        # 데이터 필터링
         target_df = df_logs[df_logs['room_name'] == sel_room].copy()
+        
+        # 선택된 방의 경계선(Limit) 가져오기
+        r_min, r_max = ALARM_CONFIG.get(sel_room, ALARM_CONFIG["default"])
         
         now = datetime.now(pytz.timezone('Asia/Seoul'))
         if sel_range == "24시간":
             target_df = target_df[target_df['created_at'] >= now - timedelta(hours=24)]
-            time_unit = 'hours'
             x_format = '%H:%M'
         elif sel_range == "1주일":
             target_df = target_df[target_df['created_at'] >= now - timedelta(days=7)]
-            time_unit = 'yearmonthdate'
             x_format = '%m-%d'
         elif sel_range == "1개월":
             target_df = target_df[target_df['created_at'] >= now - timedelta(days=30)]
-            time_unit = 'yearmonthdate'
             x_format = '%m-%d'
+        else:
+            x_format = '%Y-%m-%d'
         
         if target_df.empty:
             st.warning(f"선택한 기간에 '{sel_room}'의 데이터가 없습니다.")
         else:
-            # Altair 차트 (온도/습도 이중축)
             base = alt.Chart(target_df).encode(
                 x=alt.X('created_at:T', title='시간', axis=alt.Axis(format=x_format))
             )
             
-            line_temp = base.mark_line(color='#ff6b6b').encode(
-                y=alt.Y('temperature:Q', title='온도 (℃)', scale=alt.Scale(domain=[target_df['temperature'].min()-2, target_df['temperature'].max()+2])),
-                tooltip=['created_at', 'temperature']
+            # 온도 선
+            line_temp = base.mark_line().encode(
+                y=alt.Y('temperature:Q', title='온도 (℃)', scale=alt.Scale(domain=[target_df['temperature'].min()-5, target_df['temperature'].max()+5])),
+                color=alt.Color('sensor_id:N', legend=alt.Legend(title="센서명")),
+                tooltip=['created_at', 'sensor_id', 'temperature']
             )
             
-            line_humid = base.mark_line(color='#4dabf7').encode(
-                y=alt.Y('humidity:Q', title='습도 (%)', scale=alt.Scale(domain=[0, 100])),
-                tooltip=['created_at', 'humidity']
-            )
+            # 상한선 (빨간 점선)
+            rule_max = base.mark_rule(color='red', strokeDash=[4, 4]).encode(y=alt.datum(r_max))
+            # 하한선 (파란 점선)
+            rule_min = base.mark_rule(color='blue', strokeDash=[4, 4]).encode(y=alt.datum(r_min))
             
-            c = alt.layer(line_temp, line_humid).resolve_scale(
-                y='independent'
-            ).properties(height=350)
+            # 그래프 합치기 (선 + 상한선 + 하한선)
+            final_chart = (line_temp + rule_max + rule_min).properties(height=350)
             
-            st.altair_chart(c, use_container_width=True)
+            st.altair_chart(final_chart, use_container_width=True)
             
-            with st.expander(f"{sel_room} 전체 데이터 보기"):
-                st.dataframe(
-                    target_df[['created_at', 'sensor_id', 'temperature', 'humidity', 'status']].sort_values('created_at', ascending=False),
-                    column_config={
-                        "created_at": "측정일시",
-                        "sensor_id": "센서ID",
-                        "temperature": "온도(℃)",
-                        "humidity": "습도(%)",
-                        "status": "상태"
-                    },
-                    use_container_width=True
-                )
+            with st.expander(f"{sel_room} 전체 데이터 테이블"):
+                st.dataframe(target_df.sort_values('created_at', ascending=False), use_container_width=True)
