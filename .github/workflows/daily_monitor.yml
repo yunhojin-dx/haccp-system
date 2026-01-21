@@ -26,4 +26,6 @@ jobs:
           TUYA_API_SECRET: ${{ secrets.TUYA_API_SECRET }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # ▼▼▼ 여기가 핵심! 디스코드 주소 열쇠를 로봇에게 쥐어줌 ▼▼▼
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python collect_once.py
