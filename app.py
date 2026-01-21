@@ -647,7 +647,7 @@ with tabs[4]: # 조회/관리
                 st.rerun()
 
 # =========================================================
-# [마지막 탭] 실별 온도관리 기능 (디자인 깨짐 수정됨)
+# [마지막 탭] 실별 온도관리 기능 (그래프 개선 + 0~50도 고정)
 # =========================================================
 with tabs[5]:
     st.subheader("🌡️ 실별 온도/습도 관리")
@@ -696,7 +696,7 @@ with tabs[5]:
                             weight = "normal"
                             icon_alert = ""
                             
-                        # [핵심 수정] 들여쓰기 제거하여 한 줄로 작성 (디자인 깨짐 해결)
+                        # HTML 디자인 (들여쓰기 제거)
                         details_html += f"""<div style="display:flex; justify-content:space-between; font-size:0.85rem; color:{text_color}; font-weight:{weight}; margin-top:2px;"><span>{s_name}</span><span>{icon_alert} {s_temp:.1f}℃</span></div>"""
                     
                     if room_warning:
@@ -707,7 +707,6 @@ with tabs[5]:
                     last_time = room_sensors['created_at'].max()
                     time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - last_time).total_seconds() / 60
                     
-                    # [핵심 수정] HTML 전체를 f-string 안에 들여쓰기 없이 배치
                     st.markdown(f"""
 <div class="metric-card" style="border-top: 4px solid {header_color};">
     <div class="metric-title">{icon} {room}</div>
@@ -755,24 +754,52 @@ with tabs[5]:
         if target_df.empty:
             st.warning(f"선택한 기간에 '{sel_room}'의 데이터가 없습니다.")
         else:
-            st.caption("ℹ️ 그래프의 선 색깔은 각 '센서'를 나타냅니다.")
+            st.caption("ℹ️ **검은색 굵은 선**은 '평균 온도', **연한 색 선**은 '각 센서별 온도'입니다.")
             
+            # [1] 기본 차트 설정
             base = alt.Chart(target_df).encode(
                 x=alt.X('created_at:T', title='시간', axis=alt.Axis(format=x_format))
             )
             
-            # 온도 선
-            line_temp = base.mark_line().encode(
-                y=alt.Y('temperature:Q', title='온도 (℃)', scale=alt.Scale(domain=[target_df['temperature'].min()-5, target_df['temperature'].max()+5])),
+            # [2] 개별 센서 라인 (연하고 얇게)
+            lines_individual = base.mark_line(
+                strokeWidth=1,  # 얇게
+                opacity=0.5     # 반투명
+            ).encode(
+                y=alt.Y('temperature:Q', 
+                        title='온도 (℃)', 
+                        scale=alt.Scale(domain=[0, 50])), # ★ 0~50도 고정
                 color=alt.Color('sensor_id:N', legend=alt.Legend(title="센서명")),
                 tooltip=['created_at', 'sensor_id', 'temperature']
             )
+
+            # [3] 평균 라인 (진하고 굵게)
+            line_average = base.mark_line(
+                strokeWidth=3,  # 굵게
+                color='#333333' # 진한 회색/검정
+            ).encode(
+                y=alt.Y('mean(temperature):Q') # 평균값 자동 계산
+            )
+
+            # [4] 상한선/하한선 (별도 데이터로 분리하여 세로줄 버그 해결)
+            # 가상의 데이터프레임을 만들어서 가로선만 그립니다.
+            limit_df = pd.DataFrame([
+                {"val": r_max, "type": "상한선", "color": "red"},
+                {"val": r_min, "type": "하한선", "color": "blue"}
+            ])
             
-            # 상한선/하한선
-            rule_max = base.mark_rule(color='red', strokeDash=[4, 4]).encode(y=alt.datum(r_max))
-            rule_min = base.mark_rule(color='blue', strokeDash=[4, 4]).encode(y=alt.datum(r_min))
+            rules = alt.Chart(limit_df).mark_rule(
+                strokeDash=[4, 4], # 점선
+                size=2
+            ).encode(
+                y='val:Q',
+                color=alt.Color('type:N', scale=alt.Scale(domain=['상한선', '하한선'], range=['red', 'blue']))
+            )
             
-            st.altair_chart((line_temp + rule_max + rule_min).properties(height=350), use_container_width=True)
+            # 차트 합치기 (개별선 + 평균선 + 제한선)
+            final_chart = (lines_individual + line_average + rules).properties(height=350)
+            
+            st.altair_chart(final_chart, use_container_width=True)
             
             with st.expander(f"{sel_room} 전체 데이터 테이블"):
                 st.dataframe(target_df.sort_values('created_at', ascending=False), use_container_width=True)
