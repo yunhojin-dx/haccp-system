@@ -5,6 +5,7 @@ import uuid
 import math
 import base64
 import tempfile
+import time
 from datetime import date, datetime, timedelta
 import pytz 
 
@@ -13,7 +14,6 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 from PIL import Image
-
 from supabase import create_client
 
 # =========================================================
@@ -25,7 +25,6 @@ def get_image_base64(file_path):
     with open(file_path, "rb") as f: data = f.read()
     return base64.b64encode(data).decode()
 
-# ★ [중요] 여기가 스타일을 담당합니다.
 st.markdown("""
 <style>
     .block-container { padding-top: 3rem; padding-bottom: 3rem; font-family: 'Pretendard', sans-serif; }
@@ -97,30 +96,18 @@ sb = get_supabase()
 # =========================================================
 # [설정] 센서 매핑 / 순서 / 경보 설정
 # =========================================================
-SENSOR_CONFIG = {
-    "1호기": "쌀창고",
-    "2호기": "전처리실",
-    "3호기": "전처리실",
-    "4호기": "전처리실",
-    "5호기": "양조실",
-    "6호기": "양조실",
-    "7호기": "양조실",
-    "8호기": "제품포장실",
-    "9호기": "제품포장실",
-    "10호기": "부자재창고"
+# 기본값 (DB 연결 전이나 데이터 없을 때 사용)
+DEFAULT_SENSOR_CONFIG = {
+    "1호기": "쌀창고", "2호기": "전처리실", "3호기": "전처리실", "4호기": "전처리실",
+    "5호기": "양조실", "6호기": "양조실", "7호기": "양조실",
+    "8호기": "제품포장실", "9호기": "제품포장실", "10호기": "부자재창고"
 }
 
-# ★ [순서 설정]
 ROOM_ORDER = ["전처리실", "양조실", "제품포장실", "쌀창고", "부자재창고"]
 
-# ★ [경보 설정] (최소값, 최대값)
 ALARM_CONFIG = {
-    "쌀창고": (5.0, 25.0),
-    "전처리실": (10.0, 30.0),
-    "양조실": (20.0, 28.0),
-    "제품포장실": (10.0, 30.0),
-    "부자재창고": (0.0, 40.0),
-    "default": (0.0, 35.0)
+    "쌀창고": (5.0, 25.0), "전처리실": (10.0, 30.0), "양조실": (20.0, 28.0),
+    "제품포장실": (10.0, 30.0), "부자재창고": (0.0, 40.0), "default": (0.0, 35.0)
 }
 
 ROOM_ICONS = {
@@ -131,6 +118,15 @@ ROOM_ICONS = {
 # =========================================================
 # 2) 핵심 로직
 # =========================================================
+def fetch_sensor_mapping_from_db():
+    """DB에서 센서 위치 정보를 가져옵니다. 실패시 기본값 사용."""
+    try:
+        res = sb.table("sensor_mapping").select("*").execute()
+        if res.data:
+            return {item['sensor_id']: item['room_name'] for item in res.data}
+    except: pass
+    return DEFAULT_SENSOR_CONFIG
+
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_tasks_all() -> list[dict]:
     try:
@@ -168,7 +164,7 @@ def fetch_tasks_all() -> list[dict]:
         return []
 
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_sensor_logs(days=7) -> pd.DataFrame:
+def fetch_sensor_logs(days=7, mapping=None) -> pd.DataFrame:
     try:
         start_date = (datetime.utcnow() - timedelta(days=days)).isoformat()
         res = sb.table("sensor_logs").select("*")\
@@ -183,7 +179,11 @@ def fetch_sensor_logs(days=7) -> pd.DataFrame:
         df['created_at'] = pd.to_datetime(df['created_at'])
         df['created_at'] = df['created_at'].dt.tz_convert('Asia/Seoul')
         df['sensor_id'] = df['place'] 
-        df['room_name'] = df['place'].map(SENSOR_CONFIG).fillna("미분류")
+        
+        # ★ [수정됨] DB 매핑 정보 적용 (동적 위치 변경을 위해)
+        current_map = mapping if mapping else DEFAULT_SENSOR_CONFIG
+        df['room_name'] = df['place'].map(current_map).fillna("미분류")
+        
         return df
     except Exception as e:
         return pd.DataFrame()
@@ -647,82 +647,117 @@ with tabs[4]: # 조회/관리
                 st.rerun()
 
 # =========================================================
-# [마지막 탭] 실별 온도관리 기능 (그룹화 + 디자인/오류 수정완료)
+# [마지막 탭] 실별 온도관리 (★ 위치 변경 기능 추가됨 ★)
 # =========================================================
 with tabs[5]:
-    # ------------------------------------------------------------------
-    # 0. 데이터 및 설정 준비
-    # ------------------------------------------------------------------
+    # 1. DB에서 현재 센서 위치 정보 가져오기
+    current_mapping = fetch_sensor_mapping_from_db()
+    
+    # 2. 온도 범위 기본값 준비
     if "alarm_df" not in st.session_state:
         data_list = []
         for room, (min_v, max_v) in ALARM_CONFIG.items():
             if room != "default": 
                 data_list.append({"장소": room, "최저온도(℃)": min_v, "최고온도(℃)": max_v})
         # 순서 정렬
-        data_list.sort(key=lambda x: ROOM_ORDER.index(x["장소"]) if x["장소"] in ROOM_ORDER else 999)
+        sorted_rooms = ["전처리실", "양조실", "제품포장실", "쌀창고", "부자재창고"]
+        data_list.sort(key=lambda x: sorted_rooms.index(x["장소"]) if x["장소"] in sorted_rooms else 999)
         st.session_state.alarm_df = pd.DataFrame(data_list)
 
-    @st.dialog("⚙️ 정상 온도 범위 설정")
+    # 3. 설정 팝업창 (온도 범위 + 센서 위치 변경)
+    @st.dialog("⚙️ 환경 설정")
     def open_setting_popup():
-        st.caption("각 장소별 정상 온도 범위를 수정하세요.")
-        edited = st.data_editor(
-            st.session_state.alarm_df,
-            column_config={
-                "장소": st.column_config.TextColumn("장소", disabled=True),
-                "최저온도(℃)": st.column_config.NumberColumn("Min", min_value=-10, max_value=50, step=0.5, format="%.1f"),
-                "최고온도(℃)": st.column_config.NumberColumn("Max", min_value=-10, max_value=60, step=0.5, format="%.1f"),
-            },
-            hide_index=True, use_container_width=True, num_rows="fixed", key="popup_editor"
-        )
-        if st.button("💾 저장하고 닫기", type="primary", use_container_width=True):
-            st.session_state.alarm_df = edited
-            st.rerun()
+        tab_limit, tab_map = st.tabs(["🌡️ 온도 범위", "📍 센서 위치"])
+        
+        # [탭1] 온도 범위 수정
+        with tab_limit:
+            st.caption("각 장소별 정상 온도 범위를 수정하세요.")
+            edited_alarm = st.data_editor(
+                st.session_state.alarm_df,
+                column_config={
+                    "장소": st.column_config.TextColumn("장소", disabled=True),
+                    "최저온도(℃)": st.column_config.NumberColumn("Min", min_value=-10, max_value=50, step=0.5, format="%.1f"),
+                    "최고온도(℃)": st.column_config.NumberColumn("Max", min_value=-10, max_value=60, step=0.5, format="%.1f"),
+                },
+                hide_index=True, use_container_width=True, num_rows="fixed", key="alarm_editor"
+            )
 
-    # 헤더 구성
+        # [탭2] 센서 위치 수정 (★ 여기가 핵심 기능 ★)
+        with tab_map:
+            st.caption("센서가 설치된 장소를 변경할 수 있습니다.")
+            
+            # 현재 매핑 정보를 표로 만듦
+            map_data = [{"센서": k, "장소": v} for k, v in current_mapping.items()]
+            map_df = pd.DataFrame(map_data).sort_values("센서")
+            
+            # 선택 가능한 장소 목록
+            room_options = sorted(["쌀창고", "전처리실", "양조실", "제품포장실", "부자재창고", "사무실", "숙성실", "기타"])
+            
+            edited_map = st.data_editor(
+                map_df,
+                column_config={
+                    "센서": st.column_config.TextColumn("센서명", disabled=True),
+                    "장소": st.column_config.SelectboxColumn("설치 장소", options=room_options, required=True)
+                },
+                hide_index=True, use_container_width=True, key="map_editor"
+            )
+
+        if st.button("💾 모든 설정 저장", type="primary", use_container_width=True):
+            # 1) 세션 상태 업데이트
+            st.session_state.alarm_df = edited_alarm
+            
+            # 2) DB에 센서 위치 업데이트
+            new_mapping_rows = [{"sensor_id": r["센서"], "room_name": r["장소"]} for r in edited_map.to_dict('records')]
+            try:
+                # sensor_mapping 테이블이 없으면 자동 생성 후 저장
+                sb.table("sensor_mapping").upsert(new_mapping_rows).execute()
+                fetch_sensor_logs.clear() # 캐시 삭제 (새 설정 적용 위해)
+                st.success("저장되었습니다!")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"저장 중 오류가 발생했습니다: {e}")
+
+    # 헤더 및 설정 버튼
     col_head, col_btn = st.columns([6, 1], vertical_alignment="center")
     with col_head: st.subheader("🌡️ 실별 온도/습도 관리")
     with col_btn:
         if st.button("⚙️ 설정", use_container_width=True): open_setting_popup()
 
-    # 현재 설정값 적용
+    # 현재 설정된 온도 범위 적용
     ACTIVE_CONFIG = ALARM_CONFIG.copy()
     for index, row in st.session_state.alarm_df.iterrows():
         ACTIVE_CONFIG[row["장소"]] = (row["최저온도(℃)"], row["최고온도(℃)"])
 
-    # 데이터 가져오기
-    df_logs = fetch_sensor_logs(days=30)
+    # ★ 데이터 가져오기 (DB의 매핑 정보 전달)
+    df_logs = fetch_sensor_logs(days=30, mapping=current_mapping)
     
-    # ------------------------------------------------------------------
-    # ★ [그룹 정의] 
-    # ------------------------------------------------------------------
+    # 장소 그룹 정의 (매핑된 장소가 자동으로 분류되도록)
     ROOM_GROUPS = {
         "🏭 작업장 (Workplace)": ["전처리실", "양조실", "제품포장실"],
         "📦 창고 (Warehouse)": ["쌀창고", "부자재창고"],
-        "🌳 외곽 (Outdoor)": [] # 추후 추가
+        "🌳 외곽 (Outdoor)": [] 
     }
+    
+    # 그룹에 없는 장소는 '외곽'으로 자동 분류
+    defined_rooms = sum(ROOM_GROUPS.values(), [])
+    for r in set(current_mapping.values()):
+        if r not in defined_rooms: ROOM_GROUPS["🌳 외곽 (Outdoor)"].append(r)
 
     if df_logs.empty:
         st.info("📊 수집된 센서 데이터가 없습니다.")
     else:
-        # [중요] 오류 방지를 위해 변수를 여기서 미리 정의합니다.
-        available_rooms = set(SENSOR_CONFIG.values())
+        # DB에 설정된 장소들만 화면에 표시
+        active_rooms = set(current_mapping.values())
         latest_sensors = df_logs.sort_values('created_at').groupby('sensor_id').tail(1)
         
-        # ------------------------------------------------------------------
-        # 그룹별 카드 출력
-        # ------------------------------------------------------------------
         for group_name, rooms in ROOM_GROUPS.items():
-            # 실제 데이터가 있는 방만 골라내기
-            valid_group_rooms = [r for r in rooms if r in available_rooms]
-            
-            # 방이 하나도 없으면(데이터가 없거나 정의 안된 그룹) 패스
-            if not valid_group_rooms: 
-                continue
+            valid_rooms = [r for r in rooms if r in active_rooms]
+            if not valid_rooms: continue
 
             st.markdown(f"##### {group_name}")
-            
             cols = st.columns(4)
-            for idx, room in enumerate(valid_group_rooms):
+            for idx, room in enumerate(valid_rooms):
                 room_sensors = latest_sensors[latest_sensors['room_name'] == room]
                 
                 with cols[idx % 4]:
@@ -733,77 +768,45 @@ with tabs[5]:
                         avg_temp = room_sensors['temperature'].mean()
                         avg_humid = room_sensors['humidity'].mean()
                         
+                        # 상세 센서 정보 표시
                         details_html = ""
-                        room_warning = False
-                        
+                        is_warning = False
                         for _, row in room_sensors.iterrows():
                             s_name = row['sensor_id']
                             s_temp = row['temperature']
-                            
                             if s_temp < limit_min or s_temp > limit_max:
-                                text_color = "#e03131"
-                                weight = "bold"
-                                icon_alert = "🚨"
-                                room_warning = True
+                                color, weight, alert, is_warning = "#e03131", "bold", "🚨", True
                             else:
-                                text_color = "#555"
-                                weight = "normal"
-                                icon_alert = ""
-                            
-                            # [수정] HTML 코드 여백 제거 (한 줄로 작성)
-                            details_html += f"""<div style="display:flex; justify-content:space-between; font-size:0.75rem; color:{text_color}; font-weight:{weight}; margin-top:1px;"><span>{s_name}</span><span>{icon_alert} {s_temp:.1f}℃</span></div>"""
+                                color, weight, alert = "#555", "normal", ""
+                            details_html += f"""<div style="display:flex;justify-content:space-between;font-size:0.75rem;color:{color};font-weight:{weight};">{s_name}<span>{alert}{s_temp}℃</span></div>"""
                         
-                        if room_warning:
-                            header_color = "#e03131"
-                            title_color = "#e03131"
-                        else:
-                            header_color = "#212529" # 진한 검정
-                            title_color = "#212529"
+                        head_col = "#e03131" if is_warning else "#212529"
                         
+                        # 카드 HTML 출력
                         last_time = room_sensors['created_at'].max()
                         time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - last_time).total_seconds() / 60
                         
-                        # [핵심 수정] HTML 문자열의 들여쓰기를 완전히 제거하여 왼쪽 벽에 붙임
-                        card_html = f"""<div class="metric-card" style="border-top: 3px solid {header_color}; padding: 10px;">
-<div class="metric-title" style="font-size: 1.1rem; font-weight: 800; color: {title_color}; margin-bottom: 4px;">{icon} {room}</div>
-<div class="metric-value" style="font-size: 1.4rem; color:{header_color}">{avg_temp:.1f}℃</div>
-<div style="font-size: 0.75rem; color: #868e96;">기준: {limit_min}~{limit_max}℃</div>
-<div style="font-size: 0.9rem; color: #4dabf7; margin-bottom:6px;">💧 {avg_humid:.1f}%</div>
-<div style="border-top:1px solid #eee; margin:4px 0; padding-top:4px;"></div>
-{details_html}
-<div class="metric-sub" style="margin-top:6px; font-size: 0.7rem;">{int(time_diff)}분 전</div>
-</div>"""
-                        st.markdown(card_html, unsafe_allow_html=True)
-                        
+                        st.markdown(f"""<div class="metric-card" style="border-top:3px solid {head_col};padding:10px;">
+                        <div style="font-weight:800;color:{head_col};">{icon} {room}</div>
+                        <div style="font-size:1.4rem;color:{head_col}">{avg_temp:.1f}℃</div>
+                        <div style="font-size:0.75rem;color:#888;">기준: {limit_min}~{limit_max}</div>
+                        <div style="font-size:0.9rem;color:#4dabf7;">💧 {avg_humid:.1f}%</div>
+                        <hr style="margin:5px 0;">{details_html}
+                        <div style="margin-top:6px;font-size:0.7rem;color:#aaa;">{int(time_diff)}분 전</div></div>""", unsafe_allow_html=True)
                     else:
-                        st.markdown(f"""<div class="metric-card" style="opacity: 0.6; padding: 10px;">
-<div class="metric-title" style="font-size: 1.0rem; font-weight: 800; color: #adb5bd;">{icon} {room}</div>
-<div class="metric-value" style="font-size: 1.2rem;">-</div>
-<div class="metric-sub" style="font-size: 0.7rem;">데이터 없음</div>
-</div>""", unsafe_allow_html=True)
-            
-            st.markdown("") 
+                        st.markdown(f"""<div class="metric-card" style="opacity:0.6;"><div style="font-weight:800;color:#aaa;">{icon} {room}</div><div>-</div><div style="font-size:0.7rem;">데이터 없음</div></div>""", unsafe_allow_html=True)
+            st.markdown("")
 
         # ------------------------------------------------------------------
-        # 상세 트렌드 분석 (오류 수정됨)
+        # 상세 트렌드 분석
         # ------------------------------------------------------------------
         st.divider()
         st.markdown("#### 📈 상세 분석 (트렌드)")
         
         col_f1, col_f2 = st.columns([1, 2])
         
-        # [수정] 모든 그룹의 방을 합쳐서 리스트 생성
-        all_defined_rooms = []
-        for r_list in ROOM_GROUPS.values():
-            all_defined_rooms.extend(r_list)
-            
-        # 데이터가 존재하는 방만 필터링
-        valid_analysis_rooms = [r for r in all_defined_rooms if r in available_rooms]
-        
-        # 만약 정의된 그룹 외의 데이터가 있다면 추가
-        for r in available_rooms:
-            if r not in valid_analysis_rooms:
-                valid_analysis_rooms.append(r)
+        # 분석 가능한 방 목록 (DB 설정 기준)
+        valid_analysis_rooms = list(active_rooms)
 
         if not valid_analysis_rooms:
              st.warning("분석할 데이터가 없습니다.")
@@ -816,36 +819,28 @@ with tabs[5]:
             
             now = datetime.now(pytz.timezone('Asia/Seoul'))
             if sel_range == "24시간":
-                target_df = target_df[target_df['created_at'] >= now - timedelta(hours=24)]
-                x_format = '%H:%M'
+                target_df = target_df[target_df['created_at'] >= now - timedelta(hours=24)]; x_format = '%H:%M'
             elif sel_range == "1주일":
-                target_df = target_df[target_df['created_at'] >= now - timedelta(days=7)]
-                x_format = '%m-%d'
+                target_df = target_df[target_df['created_at'] >= now - timedelta(days=7)]; x_format = '%m-%d'
             elif sel_range == "1개월":
-                target_df = target_df[target_df['created_at'] >= now - timedelta(days=30)]
-                x_format = '%m-%d'
-            else:
-                x_format = '%Y-%m-%d'
+                target_df = target_df[target_df['created_at'] >= now - timedelta(days=30)]; x_format = '%m-%d'
+            else: x_format = '%Y-%m-%d'
             
             if target_df.empty:
                 st.warning(f"선택한 기간에 '{sel_room}'의 데이터가 없습니다.")
             else:
                 st.caption("ℹ️ **검은색 굵은 선**은 '평균 온도', **연한 색 선**은 '각 센서별 온도'입니다.")
-                
                 base = alt.Chart(target_df).encode(x=alt.X('created_at:T', title='시간', axis=alt.Axis(format=x_format)))
-                
                 lines_individual = base.mark_line(strokeWidth=1, opacity=0.5).encode(
                     y=alt.Y('temperature:Q', title='온도 (℃)', scale=alt.Scale(domain=[0, 50])),
                     color=alt.Color('sensor_id:N', legend=alt.Legend(title="센서명")),
                     tooltip=['created_at', 'sensor_id', 'temperature']
                 )
                 line_average = base.mark_line(strokeWidth=3, color='#333333').encode(y=alt.Y('mean(temperature):Q'))
-                
                 limit_df = pd.DataFrame([{"val": r_max, "type": "상한선", "color": "red"}, {"val": r_min, "type": "하한선", "color": "blue"}])
                 rules = alt.Chart(limit_df).mark_rule(strokeDash=[4, 4], size=2).encode(
                     y='val:Q', color=alt.Color('type:N', scale=alt.Scale(domain=['상한선', '하한선'], range=['red', 'blue']))
                 )
-                
                 st.altair_chart((lines_individual + line_average + rules).properties(height=350), use_container_width=True)
                 with st.expander(f"{sel_room} 전체 데이터 테이블"):
                     st.dataframe(target_df.sort_values('created_at', ascending=False), use_container_width=True)
