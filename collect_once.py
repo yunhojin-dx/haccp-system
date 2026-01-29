@@ -16,9 +16,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# [기본 목록]
-# 여기 적힌 'place'는 DB 연결 안 될 때만 쓰는 '비상용 명찰'입니다.
-# DB 연결되면 무조건 DB에 있는 이름으로 덮어씁니다.
+# [기본 센서 목록]
+# DB 연결 실패 시에만 사용하는 '비상용 명찰'입니다.
+# DB가 연결되면, DB에 저장된 '장소 이름'이 이 내용을 덮어씁니다.
 SENSORS_BASE = [
     {"name": "1호기", "id": "ebb5a8087eed5151f182k1", "place": "쌀창고"},
     {"name": "2호기", "id": "ebef0c9ce87b7e7929baam", "place": "전처리실"},
@@ -32,22 +32,22 @@ SENSORS_BASE = [
     {"name": "10호기", "id": "ebef6f23e7c1071a83njws", "place": "부자재창고"},
 ]
 
+# 기본 알림 기준 (DB 로드 실패 시 안전장치)
 DEFAULT_ALARM_CONFIG = {"default": (0.0, 35.0)}
 
 def send_discord_alert(message):
-    if not DISCORD_WEBHOOK_URL: 
-        print("❌ 디스코드 주소 없음")
-        return
+    if not DISCORD_WEBHOOK_URL: return
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": message, "username": "천안공장 상황실"})
-        print("📢 디스코드 전송 성공")
-    except Exception as e: 
-        print(f"❌ 디스코드 전송 실패: {e}")
+        requests.post(DISCORD_WEBHOOK_URL, json={
+            "content": message, 
+            "username": "천안공장 상황실"
+        })
+    except: pass
 
 # =======================================================
-# [2] 메인 로직 (테스트 모드)
+# [2] 메인 로직
 # =======================================================
-print("🏭 [강제 알림 모드] 비정상이면 무조건 알림을 보냅니다.")
+print("🏭 [GitHub Action] 센서 수집 및 DB 동기화 시작...")
 
 try:
     if not API_KEY or not SUPABASE_URL:
@@ -57,31 +57,29 @@ try:
     cloud = tinytuya.Cloud(apiRegion=REGION, apiKey=API_KEY, apiSecret=API_SECRET)
     
     # -----------------------------------------------------------
-    # 1. DB에서 최신 설정 가져오기 (여기가 핵심!)
+    # ★ [핵심] 앱에서 저장한 설정(위치 & 온도기준) 불러오기
     # -----------------------------------------------------------
     current_mapping = {}
     current_limits = {}
 
-    # (1) 위치 정보 로드
+    # 1. 위치 매핑 정보 (sensor_mapping 테이블)
     try:
         res_map = supabase.table("sensor_mapping").select("*").execute()
         if res_map.data:
             current_mapping = {item['sensor_id']: item['room_name'] for item in res_map.data}
-            print(f"✅ 위치 매핑 로드 성공 ({len(current_mapping)}개)")
-            print(f"   👉 매핑 데이터: {current_mapping}") 
-    except:
-        print("⚠️ 위치 정보 로드 실패 (기본값 사용)")
+            print(f"✅ 위치 설정 로드 완료: {len(current_mapping)}개 센서 동기화")
+    except Exception as e:
+        print(f"⚠️ 위치 설정 로드 실패 (기본값 사용): {e}")
 
-    # (2) 온도 기준 로드
+    # 2. 온도 기준 정보 (room_settings 테이블)
     try:
         res_set = supabase.table("room_settings").select("*").execute()
         if res_set.data:
             for item in res_set.data:
                 current_limits[item['room_name']] = (float(item['min_temp']), float(item['max_temp']))
-            print(f"✅ 온도 기준 로드 성공 ({len(current_limits)}개)")
-    except:
-        print("⚠️ 온도 기준 로드 실패 (기본값 사용)")
-
+            print(f"✅ 온도 기준 로드 완료: {len(current_limits)}개 장소 동기화")
+    except Exception as e:
+        print(f"⚠️ 온도 기준 로드 실패 (기본값 사용): {e}")
     # -----------------------------------------------------------
 
     kst = pytz.timezone('Asia/Seoul')
@@ -89,8 +87,8 @@ try:
     alert_messages = []
     
     for sensor in SENSORS_BASE:
-        # ★ [중요] DB에 설정된 이름이 있으면 그걸 쓰고, 없으면 기본값(place) 사용
-        # 여기서 공장장님이 앱에서 바꾼 이름이 적용됩니다.
+        # [우선순위 적용] DB에 설정된 이름이 있으면 덮어씁니다.
+        # 앱에서 '1호기'를 '제2숙성실'로 바꿨다면, 여기서 real_place_name은 '제2숙성실'이 됩니다.
         real_place_name = current_mapping.get(sensor['name'], sensor['place'])
         
         # Tuya 데이터 수집
@@ -104,19 +102,20 @@ try:
             for item in res['result']:
                 if item['code'] == 'temp_current':
                     val = float(item['value'])
+                    # 10호기 겨울철 40(4.0도) 버그 보정
                     temp = val / 10.0 if val > 40 else val
                 elif item['code'] == 'humidity_value':
                     val = float(item['value'])
                     humid = val / 10.0 if val > 100 else val
         
         if temp != -999:
-            # 해당 장소의 온도 기준 가져오기 (DB값)
+            # 해당 장소의 온도 기준 가져오기 (DB값 우선)
             min_v, max_v = current_limits.get(real_place_name, DEFAULT_ALARM_CONFIG["default"])
             
             # 상태 판단
             current_status = "비정상" if (temp < min_v or temp > max_v) else "정상"
             
-            # DB 저장
+            # DB 저장 (업데이트된 장소 이름으로 저장)
             supabase.table("sensor_logs").insert({
                 "place": sensor['name'], 
                 "temperature": temp, 
@@ -126,17 +125,25 @@ try:
                 "room_name": real_place_name
             }).execute()
 
-            # ★ [로그 출력] 공장장님이 눈으로 확인할 부분
-            print(f"🔍 [{sensor['name']}] -> 최종위치: {real_place_name} | 온도: {temp}℃ (기준: {min_v}~{max_v}) | 상태: {current_status}")
+            # 스마트 알림 (이전 상태와 비교)
+            last_log = supabase.table("sensor_logs").select("status")\
+                .eq("place", sensor['name'])\
+                .order("created_at", desc=True)\
+                .limit(1).execute()
+            
+            prev_status = "정상"
+            if last_log.data: prev_status = last_log.data[0]['status']
 
-            # ★ [알림 로직] 과거 기록 무시하고, 지금 비정상이면 무조건 보냄!
-            if current_status == "비정상":
+            # ★ 알림 조건: 상태가 변했을 때만!
+            if current_status == "비정상" and prev_status != "비정상":
                 alert_messages.append(f"🔥 **{real_place_name} ({sensor['name']}) 온도 이탈!**\n> 현재: {temp}℃ (기준: {min_v}~{max_v}℃)")
+            elif current_status == "정상" and prev_status == "비정상":
+                alert_messages.append(f"✅ **{real_place_name} ({sensor['name']}) 온도 복구**\n> 현재: {temp}℃")
 
     if alert_messages:
-        send_discord_alert("## 📢 강제 알림 테스트\n" + "\n".join(alert_messages))
+        send_discord_alert("## 📢 천안공장 상황 알림\n" + "\n".join(alert_messages))
     else:
-        print("🕊️ 모든 센서가 정상 범위입니다. (알림 없음)")
+        print("🕊️ 특이사항 없음 (모든 센서 상태 유지 중)")
 
 except Exception as e:
     print(f"❌ 오류 발생: {e}")
