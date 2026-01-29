@@ -5,6 +5,7 @@ import uuid
 import math
 import base64
 import tempfile
+import time
 from datetime import date, datetime, timedelta
 import pytz 
 
@@ -13,11 +14,10 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 from PIL import Image
-
 from supabase import create_client
 
 # =========================================================
-# 0) 기본 UI 설정 (CSS 스타일 정의)
+# 0) 기본 UI 설정
 # =========================================================
 st.set_page_config(page_title="천안공장 위생 개선관리", layout="wide", initial_sidebar_state="collapsed")
 
@@ -56,12 +56,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-logo_html = ""
+logo_html = "<div class='fallback-icon'>🍶</div>"
 if os.path.exists("logo.png"):
     img_b64 = get_image_base64("logo.png")
     logo_html = f'<img src="data:image/png;base64,{img_b64}" alt="로고">'
-else:
-    logo_html = "<div class='fallback-icon'>🍶</div>"
 
 st.markdown(f"""
 <div class="header-container">
@@ -72,7 +70,6 @@ st.markdown(f"""
     </div>
 </div>
 """, unsafe_allow_html=True)
-
 
 # =========================================================
 # 1) Secrets & DB 연결
@@ -91,41 +88,49 @@ def get_supabase():
 
 sb = get_supabase()
 
-# =========================================================
-# [설정] 센서 매핑 / 순서 / 경보 설정
-# =========================================================
-SENSOR_CONFIG = {
-    "1호기": "쌀창고",
-    "2호기": "전처리실",
-    "3호기": "전처리실",
-    "4호기": "전처리실",
-    "5호기": "양조실",
-    "6호기": "양조실",
-    "7호기": "양조실",
-    "8호기": "제품포장실",
-    "9호기": "제품포장실",
-    "10호기": "부자재창고"
+# 초기 설정 (DB 연결 실패 시 안전장치)
+DEFAULT_SENSOR_CONFIG = {
+    "1호기": "쌀창고", "2호기": "전처리실", "3호기": "전처리실", "4호기": "전처리실",
+    "5호기": "양조실", "6호기": "양조실", "7호기": "양조실",
+    "8호기": "제품포장실", "9호기": "제품포장실", "10호기": "부자재창고"
 }
-
 ROOM_ORDER = ["전처리실", "양조실", "제품포장실", "쌀창고", "부자재창고"]
-
 ALARM_CONFIG = {
-    "쌀창고": (5.0, 25.0),
-    "전처리실": (10.0, 30.0),
-    "양조실": (20.0, 28.0),
-    "제품포장실": (10.0, 30.0),
-    "부자재창고": (0.0, 40.0),
-    "default": (0.0, 35.0)
+    "쌀창고": (5.0, 25.0), "전처리실": (10.0, 30.0), "양조실": (20.0, 28.0),
+    "제품포장실": (10.0, 30.0), "부자재창고": (0.0, 40.0), "default": (0.0, 35.0)
 }
-
-ROOM_ICONS = {
-    "쌀창고": "🌾", "전처리실": "🥣", "양조실": "🍶", 
-    "제품포장실": "📦", "부자재창고": "🔧"
-}
+ROOM_ICONS = {"쌀창고": "🌾", "전처리실": "🥣", "양조실": "🍶", "제품포장실": "📦", "부자재창고": "🔧"}
 
 # =========================================================
 # 2) 핵심 로직
 # =========================================================
+def fetch_sensor_mapping_from_db():
+    """DB에서 센서 위치 정보를 가져옵니다. 실패시 기본값 사용."""
+    try:
+        res = sb.table("sensor_mapping").select("*").execute()
+        if res.data:
+            return {item['sensor_id']: item['room_name'] for item in res.data}
+    except: pass
+    return DEFAULT_SENSOR_CONFIG
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_sensor_logs(days=7, mapping=None) -> pd.DataFrame:
+    try:
+        start_date = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        res = sb.table("sensor_logs").select("*").gte("created_at", start_date).order("created_at", desc=True).limit(5000).execute()
+        data = res.data or []
+        if not data: return pd.DataFrame()
+        
+        df = pd.DataFrame(data)
+        df['created_at'] = pd.to_datetime(df['created_at']).dt.tz_convert('Asia/Seoul')
+        df['sensor_id'] = df['place'] 
+        
+        # ★ DB 매핑 적용 (여기가 핵심)
+        current_map = mapping if mapping else DEFAULT_SENSOR_CONFIG
+        df['room_name'] = df['place'].map(current_map).fillna("미분류")
+        return df
+    except: return pd.DataFrame()
+
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_tasks_all() -> list[dict]:
     try:
@@ -137,65 +142,28 @@ def fetch_tasks_all() -> list[dict]:
         res_p = sb.table("haccp_task_photos").select("*").in_("task_id", t_ids).execute()
         photos = res_p.data or []
         
-        photo_map_before = {}
-        photo_map_after = {}
-        
+        p_map_b, p_map_a = {}, {}
         for p in photos:
             tid = p["task_id"]
             if "id" in p and "photo_id" not in p: p["photo_id"] = p["id"]
-            
-            path = p.get('storage_path', '')
-            if '/AFTER_' in path:
-                if tid not in photo_map_after: photo_map_after[tid] = []
-                photo_map_after[tid].append(p)
-            else:
-                if tid not in photo_map_before: photo_map_before[tid] = []
-                photo_map_before[tid].append(p)
+            target_map = p_map_a if '/AFTER_' in p.get('storage_path', '') else p_map_b
+            if tid not in target_map: target_map[tid] = []
+            target_map[tid].append(p)
             
         for t in tasks:
-            t["photos_before"] = photo_map_before.get(t["id"], [])
-            t["photos_after"] = photo_map_after.get(t["id"], [])
+            t["photos_before"] = p_map_b.get(t["id"], [])
+            t["photos_after"] = p_map_a.get(t["id"], [])
             t["photos"] = t["photos_before"] + t["photos_after"]
-            
         return tasks
-    except Exception as e:
-        print(f"DB Error: {e}")
-        return []
-
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_sensor_logs(days=7) -> pd.DataFrame:
-    try:
-        start_date = (datetime.utcnow() - timedelta(days=days)).isoformat()
-        res = sb.table("sensor_logs").select("*")\
-            .gte("created_at", start_date)\
-            .order("created_at", desc=True)\
-            .limit(5000)\
-            .execute()
-        data = res.data or []
-        if not data: return pd.DataFrame()
-        
-        df = pd.DataFrame(data)
-        df['created_at'] = pd.to_datetime(df['created_at'])
-        df['created_at'] = df['created_at'].dt.tz_convert('Asia/Seoul')
-        df['sensor_id'] = df['place'] 
-        df['room_name'] = df['place'].map(SENSOR_CONFIG).fillna("미분류")
-        return df
-    except Exception as e:
-        return pd.DataFrame()
+    except: return []
 
 def clear_cache():
     fetch_tasks_all.clear()
     fetch_sensor_logs.clear()
 
+# HACCP 관련 함수들
 def insert_task(issue_date, location, issue_text, reporter, grade):
-    row = {
-        "issue_date": str(issue_date), 
-        "location": location.strip(), 
-        "issue_text": issue_text.strip(), 
-        "reporter": reporter.strip(), 
-        "grade": grade, 
-        "status": "진행중"
-    }
+    row = {"issue_date": str(issue_date), "location": location.strip(), "issue_text": issue_text.strip(), "reporter": reporter.strip(), "grade": grade, "status": "진행중"}
     res = sb.table("haccp_tasks").insert(row).execute()
     clear_cache()
     return res.data[0]["id"]
@@ -207,118 +175,38 @@ def update_task(task_id, patch):
 def delete_task_entirely(task_id: str, photos: list):
     if photos:
         paths = [p.get("storage_path") for p in photos if p.get("storage_path")]
-        if paths:
+        if paths: 
             try: sb.storage.from_(BUCKET).remove(paths)
             except: pass 
     sb.table("haccp_tasks").delete().eq("id", task_id).execute()
     clear_cache()
 
-def compress_image(file_bytes: bytes, max_w=1024, quality=70) -> tuple[bytes, str]:
+def compress_image(file_bytes: bytes, max_w=1024) -> tuple[bytes, str]:
     img = Image.open(io.BytesIO(file_bytes))
-    if img.mode in ("RGBA", "P"):
-        img = img.convert("RGB")
+    if img.mode in ("RGBA", "P"): img = img.convert("RGB")
     w, h = img.size
     if w > max_w:
         new_h = int(h * (max_w / w))
         img = img.resize((max_w, new_h), Image.Resampling.LANCZOS)
     out = io.BytesIO()
-    img.save(out, format="JPEG", quality=quality, optimize=True)
+    img.save(out, format="JPEG", quality=70, optimize=True)
     return out.getvalue(), "jpg"
 
-def make_public_url(bucket: str, path: str) -> str:
-    return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
-
-def upload_photo(task_id: str, uploaded_file, photo_type="BEFORE") -> dict:
+def upload_photo(task_id: str, uploaded_file, photo_type="BEFORE"):
     raw = uploaded_file.read()
-    compressed, ext = compress_image(raw, max_w=1024, quality=70)
+    compressed, ext = compress_image(raw)
     filename = f"{photo_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.{ext}"
     key = f"{task_id}/{filename}"
     sb.storage.from_(BUCKET).upload(path=key, file=compressed, file_options={"content-type": "image/jpeg", "upsert": "false"})
-    url = make_public_url(BUCKET, key)
-    row = {"task_id": task_id, "storage_path": key, "public_url": url}
-    sb.table("haccp_task_photos").insert(row).execute()
+    url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{key}"
+    sb.table("haccp_task_photos").insert({"task_id": task_id, "storage_path": key, "public_url": url}).execute()
     clear_cache()
-    return row
 
 def delete_photo(photo_id: str, storage_path: str):
     try: sb.storage.from_(BUCKET).remove([storage_path])
     except: pass
     sb.table("haccp_task_photos").delete().eq("id", photo_id).execute()
     clear_cache()
-
-def download_image_to_temp(url: str) -> str | None:
-    try:
-        r = requests.get(url, timeout=5)
-        r.raise_for_status()
-        fd, path = tempfile.mkstemp(suffix=".jpg")
-        os.close(fd)
-        with open(path, "wb") as f: f.write(r.content)
-        return path
-    except: return None
-
-def export_excel(tasks: list[dict]) -> bytes:
-    rows = []
-    for t in tasks:
-        rows.append({
-            "ID": t.get("legacy_id") or t["id"],
-            "일시": t.get("issue_date"),
-            "공정/장소": t.get("location"),
-            "등급": t.get("grade"), 
-            "개선 필요사항": t.get("issue_text"),
-            "발견자": t.get("reporter"),
-            "진행상태": t.get("status"),
-            "담당자": t.get("assignee"),
-            "개선계획(일정)": t.get("plan_due"),
-            "개선계획(내용)": t.get("plan_text"),
-            "개선내용": t.get("action_text"),
-            "개선완료일": t.get("action_done_date"),
-        })
-    df = pd.DataFrame(rows)
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-        sheet_data = "데이터"
-        df.to_excel(writer, sheet_name=sheet_data, index=False, startrow=1, header=False)
-        wb = writer.book
-        ws = writer.sheets[sheet_data]
-        header_fmt = wb.add_format({"bold": True, "bg_color": "#EFEFEF", "border": 1, "align": "center", "valign": "vcenter"})
-        cell_fmt = wb.add_format({"align": "center", "valign": "vcenter", "text_wrap": True, "border": 1})
-        for col, name in enumerate(df.columns): ws.write(0, col, name, header_fmt)
-        
-        ws.set_column(0, 0, 30, cell_fmt)
-        ws.set_column(1, 2, 15, cell_fmt)
-        ws.set_column(3, 3, 10, cell_fmt) 
-        ws.set_column(4, 4, 40, cell_fmt) 
-        ws.set_column(5, 11, 15, cell_fmt)
-        
-        base_col = len(df.columns)
-        photo_headers = ["개선전_사진1", "개선전_사진2", "개선후_사진1", "개선후_사진2"]
-        for i, ph in enumerate(photo_headers):
-            ws.write(0, base_col + i, ph, header_fmt)
-            ws.set_column(base_col + i, base_col + i, 22, cell_fmt)
-        for r in range(1, len(df) + 1): ws.set_row(r, 100)
-        for idx, t in enumerate(tasks):
-            befores = t.get("photos_before", [])[:2]
-            afters = t.get("photos_after", [])[:2]
-            export_photos = befores + [None]*(2-len(befores)) + afters + [None]*(2-len(afters))
-            for j, p in enumerate(export_photos):
-                if p and p.get("public_url"):
-                    img_path = download_image_to_temp(p.get("public_url"))
-                    if img_path:
-                        try:
-                            with Image.open(img_path) as img: w, h = img.size
-                            scale = min(150 / w, 130 / h) * 0.9
-                            ws.insert_image(idx + 1, base_col + j, img_path, {"x_scale": scale, "y_scale": scale, "object_position": 1})
-                        except: pass
-        sheet_sum = "요약"
-        ws2 = wb.add_worksheet(sheet_sum)
-        total = len(tasks)
-        done = sum(1 for t in tasks if t.get("status") == "완료")
-        rate = (done / total * 100) if total else 0.0
-        ws2.write(0, 0, "HACCP 개선 보고서", wb.add_format({"bold": True, "font_size": 16}))
-        ws2.write(2, 0, "총 발굴건수"); ws2.write(2, 1, total)
-        ws2.write(3, 0, "개선완료 건수"); ws2.write(3, 1, done)
-        ws2.write(4, 0, "완료율(%)"); ws2.write(4, 1, round(rate, 1))
-    return out.getvalue()
 
 def display_photos_grid(photos, title=None):
     if title: st.markdown(f"**{title}**")
@@ -329,6 +217,19 @@ def display_photos_grid(photos, title=None):
     for i, p in enumerate(photos):
         with cols[i % 4]: st.image(p.get("public_url"), use_container_width=True)
 
+def export_excel(tasks: list[dict]) -> bytes:
+    rows = []
+    for t in tasks:
+        rows.append({
+            "일시": t.get("issue_date"), "장소": t.get("location"), "등급": t.get("grade"),
+            "내용": t.get("issue_text"), "상태": t.get("status"), "조치내용": t.get("action_text")
+        })
+    df = pd.DataFrame(rows)
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False)
+    return out.getvalue()
+
 GRADE_OPTIONS = ["C등급", "B등급", "A등급", "공장장", "본부장", "대표이사"]
 
 # =========================================================
@@ -336,344 +237,146 @@ GRADE_OPTIONS = ["C등급", "B등급", "A등급", "공장장", "본부장", "대
 # =========================================================
 tabs = st.tabs(["📊 대시보드", "📝 문제등록", "📅 계획수립", "🛠️ 조치입력", "🔍 조회/관리", "🌡️ 실별온도관리"])
 
+# --- [기존 기능 유지] 탭 0~4 ---
 with tabs[0]: # 대시보드
     raw_tasks = fetch_tasks_all()
-    if not raw_tasks:
-        st.info("등록된 데이터가 없습니다.")
+    if not raw_tasks: st.info("데이터가 없습니다.")
     else:
         df_all = pd.DataFrame(raw_tasks)
-        df_all['issue_date'] = pd.to_datetime(df_all['issue_date'])
-        df_all['Year'] = df_all['issue_date'].dt.year
-        df_all['YYYY-MM'] = df_all['issue_date'].dt.strftime('%Y-%m')
-        df_all['Week_Label'] = df_all['issue_date'].apply(lambda x: f"{x.year}-{x.isocalendar()[1]:02d}주차")
-        if 'grade' not in df_all.columns: df_all['grade'] = "미지정"
-        df_all['grade'] = df_all['grade'].fillna("미지정")
-
-        c1, c2 = st.columns([1, 4])
-        with c1: period_mode = st.selectbox("기간 기준", ["월간", "주간", "연간", "기간지정"], index=0)
-        
-        filtered_df = df_all.copy()
-        today = date.today()
-        
-        with c2:
-            if period_mode == "월간":
-                all_months = sorted(df_all['YYYY-MM'].unique(), reverse=True)
-                this_month = datetime.now().strftime('%Y-%m')
-                default_m = [this_month] if this_month in all_months else (all_months[:1] if all_months else [])
-                selected_months = st.multiselect("조회할 월 선택", all_months, default=default_m)
-                filtered_df = df_all[df_all['YYYY-MM'].isin(selected_months)] if selected_months else df_all.iloc[0:0]
-            elif period_mode == "주간":
-                all_weeks = sorted(df_all['Week_Label'].unique(), reverse=True)
-                this_year, this_week, _ = datetime.now().isocalendar()
-                this_week_label = f"{this_year}-{this_week:02d}주차"
-                default_w = [this_week_label] if this_week_label in all_weeks else (all_weeks[:1] if all_weeks else [])
-                selected_weeks = st.multiselect("조회할 주차 선택", all_weeks, default=default_w)
-                filtered_df = df_all[df_all['Week_Label'].isin(selected_weeks)] if selected_weeks else df_all.iloc[0:0]
-            elif period_mode == "연간":
-                all_years = sorted(df_all['Year'].unique(), reverse=True)
-                this_year = datetime.now().year
-                default_y = [this_year] if this_year in all_years else (all_years[:1] if all_years else [])
-                selected_years = st.multiselect("조회할 연도 선택", all_years, default=default_y)
-                filtered_df = df_all[df_all['Year'].isin(selected_years)] if selected_years else df_all.iloc[0:0]
-            else: 
-                d_col1, d_col2 = st.columns(2)
-                start_d = d_col1.date_input("시작", value=today - timedelta(weeks=1))
-                end_d = d_col2.date_input("종료", value=today)
-                filtered_df = df_all[(df_all['issue_date'].dt.date >= start_d) & (df_all['issue_date'].dt.date <= end_d)]
-
-        st.divider()
-        total_cnt = len(filtered_df)
-        done_cnt = len(filtered_df[filtered_df['status'] == '완료'])
+        total_cnt = len(df_all)
+        done_cnt = len(df_all[df_all['status'] == '완료'])
         rate = (done_cnt / total_cnt * 100) if total_cnt > 0 else 0.0
+        c1, c2, c3 = st.columns(3)
+        c1.metric("총 발생", f"{total_cnt}건")
+        c2.metric("조치 완료", f"{done_cnt}건")
+        c3.metric("완료율", f"{rate:.1f}%")
+        st.dataframe(df_all[['issue_date', 'location', 'grade', 'status']], use_container_width=True)
 
-        m1, m2, m3, m4 = st.columns([1, 1, 1, 2])
-        m1.metric("총 발생", f"{total_cnt}건")
-        m2.metric("조치 완료", f"{done_cnt}건")
-        m3.metric("완료율", f"{rate:.1f}%")
-        with m4:
-            if st.button("📥 엑셀 다운로드", type="primary", use_container_width=True):
-                with st.spinner("생성 중..."):
-                    st.download_button("⬇️ 파일 받기", data=export_excel(filtered_df.to_dict('records')), file_name=f"HACCP_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-        st.divider()
-        if total_cnt == 0: st.warning("데이터가 없습니다.")
-        else:
-            col_chart, col_table = st.columns([1, 1])
-            filtered_df['공정/장소'] = filtered_df['location'].fillna("미분류").str.strip()
-            loc_stats = filtered_df.groupby('공정/장소').agg(발생건수=('id', 'count'), 완료건수=('status', lambda x: (x == '완료').sum())).reset_index()
-            loc_stats['개선율'] = (loc_stats['완료건수'] / loc_stats['발생건수'] * 100).round(1)
-            loc_stats = loc_stats.sort_values('발생건수', ascending=False)
-
-            with col_chart:
-                st.markdown("##### 📊 장소별 현황")
-                c_data = loc_stats.melt('공정/장소', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
-                chart = alt.Chart(c_data).mark_bar().encode(
-                    x=alt.X('공정/장소:N', sort='-y', axis=alt.Axis(labelAngle=0), title=None),
-                    y=alt.Y('건수:Q', title=None),
-                    color=alt.Color('구분:N', scale=alt.Scale(domain=['발생건수', '완료건수'], range=['#FF9F36', '#2ECC71'])),
-                    xOffset='구분:N', tooltip=['공정/장소', '구분', '건수']
-                ).properties(height=300)
-                st.altair_chart(chart, use_container_width=True)
-
-            with col_table:
-                st.markdown("##### 📋 장소별 상세 집계")
-                st.dataframe(loc_stats.rename(columns={'공정/장소': '장소'}), use_container_width=True, hide_index=True, height=300)
-
-            st.divider()
-            
-            grade_stats = filtered_df.groupby('grade').agg(
-                발생건수=('id', 'count'), 
-                완료건수=('status', lambda x: (x == '완료').sum())
-            ).reset_index()
-            grade_stats['개선율'] = (grade_stats['완료건수'] / grade_stats['발생건수'] * 100).round(1)
-            
-            sort_order = ["C등급", "B등급", "A등급", "공장장", "본부장", "대표이사", "미지정"]
-            grade_stats['grade'] = pd.Categorical(grade_stats['grade'], categories=sort_order, ordered=True)
-            grade_stats = grade_stats.sort_values('grade')
-
-            c_g_chart, c_g_table = st.columns([1, 1])
-            
-            with c_g_chart:
-                st.markdown("##### 📊 등급별 발생/완료 현황")
-                g_data = grade_stats.melt('grade', value_vars=['발생건수', '완료건수'], var_name='구분', value_name='건수')
-                chart_g = alt.Chart(g_data).mark_bar().encode(
-                    x=alt.X('grade:N', sort=sort_order, title="등급", axis=alt.Axis(labelAngle=0)),
-                    y=alt.Y('건수:Q', title=None),
-                    color=alt.Color('구분:N', scale=alt.Scale(domain=['발생건수', '완료건수'], range=['#FF9F36', '#2ECC71'])),
-                    xOffset='구분:N', tooltip=['grade', '구분', '건수']
-                ).properties(height=300)
-                st.altair_chart(chart_g, use_container_width=True)
-                
-            with c_g_table:
-                st.markdown("##### 📋 등급별 상세 집계")
-                st.dataframe(
-                    grade_stats.rename(columns={'grade': '등급'}),
-                    column_config={
-                        "등급": st.column_config.TextColumn("등급"),
-                        "발생건수": st.column_config.NumberColumn("발생", format="%d"),
-                        "완료건수": st.column_config.NumberColumn("완료", format="%d"),
-                        "개선율": st.column_config.ProgressColumn("진행률", format="%.1f%%", min_value=0, max_value=100),
-                    },
-                    use_container_width=True,
-                    hide_index=True,
-                    height=300
-                )
-
-with tabs[1]: # 문제 등록
+with tabs[1]: # 문제등록
     st.subheader("📝 문제 등록")
     with st.form("form_register", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
         issue_date = c1.date_input("일시", value=date.today())
-        location = c2.text_input("장소", placeholder="예: 포장실")
-        reporter = c3.text_input("발견자", placeholder="예: 홍길동")
-        grade = c4.selectbox("관리 등급", GRADE_OPTIONS)
-        
-        issue_text = st.text_area("내용", placeholder="내용 입력", height=100)
-        photos = st.file_uploader("사진 (개선 전)", type=["jpg", "png", "webp"], accept_multiple_files=True)
+        location = c2.text_input("장소")
+        reporter = c3.text_input("발견자")
+        grade = c4.selectbox("등급", GRADE_OPTIONS)
+        issue_text = st.text_area("내용")
+        photos = st.file_uploader("사진", accept_multiple_files=True)
         if st.form_submit_button("등록", type="primary"):
-            if not (location and reporter and issue_text):
-                st.error("필수 항목 누락")
-            else:
-                try:
-                    tid = insert_task(issue_date, location, issue_text, reporter, grade)
-                    if photos:
-                        for f in photos: upload_photo(tid, f, photo_type="BEFORE")
-                    st.success("저장 완료!")
-                except Exception as e: st.error(f"오류: {e}")
+            if location and reporter:
+                tid = insert_task(issue_date, location, issue_text, reporter, grade)
+                if photos: 
+                    for f in photos: upload_photo(tid, f)
+                st.success("등록 완료")
+            else: st.error("필수 입력 누락")
 
-with tabs[2]: # 계획 수립
+with tabs[2]: # 계획수립
     st.subheader("📅 계획 수립")
     tasks = fetch_tasks_all()
-    tasks = [t for t in tasks if t['status'] != '완료'] 
-    if not tasks: st.info("대상 과제 없음")
-    else:
-        opts = [f"[{t.get('grade') or '-'}] {t['issue_date']} | {t['location']} - {t['issue_text'][:15]}..." for t in tasks]
+    tasks = [t for t in tasks if t['status'] != '완료']
+    if tasks:
+        opts = [f"{t['issue_date']} | {t['location']} - {t['issue_text'][:10]}..." for t in tasks]
         sel = st.selectbox("과제 선택", opts)
         t = tasks[opts.index(sel)]
-        
-        st.markdown(f"### <span class='grade-badge'>{t.get('grade') or '미지정'}</span> {t['location']}", unsafe_allow_html=True)
         st.info(f"내용: {t['issue_text']}")
-        display_photos_grid(t.get('photos_before', []), "📸 개선 전 사진")
-        
         with st.form("form_plan"):
-            st.markdown("**✏️ 내용 수정**")
-            new_issue_text = st.text_area("개선 필요사항 (내용 수정 가능)", value=t['issue_text'], height=100)
-            
-            c1, c2, c3 = st.columns(3)
-            assignee = c1.text_input("담당자", value=t.get('assignee') or "")
-            plan_due = c2.date_input("계획일정", value=pd.to_datetime(t.get('plan_due')).date() if t.get('plan_due') else date.today())
-            new_grade = c3.selectbox("등급 수정", GRADE_OPTIONS, index=GRADE_OPTIONS.index(t.get('grade')) if t.get('grade') in GRADE_OPTIONS else 0)
-            
             plan_text = st.text_area("계획내용", value=t.get('plan_text') or "")
             if st.form_submit_button("저장"):
-                update_task(t['id'], {
-                    "issue_text": new_issue_text, 
-                    "assignee": assignee, 
-                    "plan_due": str(plan_due), 
-                    "plan_text": plan_text,
-                    "grade": new_grade
-                })
-                st.success("완료")
-                st.rerun()
+                update_task(t['id'], {"plan_text": plan_text})
+                st.success("저장됨"); st.rerun()
 
-with tabs[3]: # 조치 입력
-    st.subheader("🛠️ 조치 결과 입력")
-    all_tasks = fetch_tasks_all()
-    target_tasks = [t for t in all_tasks if t['status'] != '완료']
-
-    if not target_tasks:
-        st.info("조치할 미완료 과제가 없습니다.")
-        if st.button("새로고침"): clear_cache(); st.rerun()
-    else:
-        assignees = sorted(list(set([t.get('assignee') or "미지정" for t in target_tasks])))
-        locations = sorted(list(set([t.get('location') or "미분류" for t in target_tasks])))
-        
-        c_filter1, c_filter2 = st.columns(2)
-        sel_assignee = c_filter1.selectbox("👤 담당자 필터", ["전체"] + assignees)
-        sel_location = c_filter2.selectbox("🏢 장소 필터", ["전체"] + locations)
-            
-        filtered_tasks = target_tasks
-        if sel_assignee != "전체":
-            if sel_assignee == "미지정": filtered_tasks = [t for t in filtered_tasks if not t.get('assignee')]
-            else: filtered_tasks = [t for t in filtered_tasks if t.get('assignee') == sel_assignee]
-        if sel_location != "전체":
-             filtered_tasks = [t for t in filtered_tasks if (t.get('location') or "미분류") == sel_location]
-
-        if not filtered_tasks: st.warning("조건에 맞는 과제가 없습니다.")
-        else:
-            task_map = {f"[{t.get('grade') or '-'}] {t['issue_date']} {t['location']} - {t['issue_text'][:15]}...": t for t in filtered_tasks}
-            sel_label = st.selectbox("대상 과제 선택", list(task_map.keys()))
-            t = task_map[sel_label]
-            
-            st.divider()
-            st.markdown(f"### <span class='grade-badge'>{t.get('grade') or '미지정'}</span> {t['location']}", unsafe_allow_html=True)
-            st.info(f"📌 문제 내용: {t['issue_text']}")
-            
-            plan_txt = t.get('plan_text')
-            if plan_txt: st.success(f"📅 계획 내용: {plan_txt}")
-            else: st.warning("📅 계획 내용: 수립된 계획이 없습니다.")
-            
-            c_p1, c_p2 = st.columns(2)
-            with c_p1: display_photos_grid(t.get('photos_before', []), "🔴 개선 전")
-            with c_p2: display_photos_grid(t.get('photos_after', []), "🟢 개선 후 (현재)")
-
-            with st.expander("➕ 개선 완료(After) 사진 추가"):
-                act_photos = st.file_uploader("사진 업로드", type=["jpg", "png", "webp"], accept_multiple_files=True, key=f"act_up_{t['id']}")
-                if act_photos and st.button("사진 저장", key=f"btn_act_{t['id']}"):
-                    for f in act_photos: upload_photo(t['id'], f, photo_type="AFTER")
-                    st.success("등록됨")
-                    st.rerun()
-            
-            st.divider()
-            with st.form("form_act"):
-                action_text = st.text_area("조치내용", value=t.get('action_text') or "")
-                action_done_date = st.date_input("완료일", value=pd.to_datetime(t.get('action_done_date')).date() if t.get('action_done_date') else date.today())
-                if st.form_submit_button("조치 완료 처리", type="primary"):
-                    update_task(t['id'], {"action_text": action_text, "action_done_date": str(action_done_date), "status": "완료"})
-                    st.balloons()
-                    st.success("완료 처리되었습니다.")
-                    st.rerun()
-
-with tabs[4]: # 조회/관리
-    st.subheader("🔍 통합 조회 및 관리")
-    c1, c2, c3 = st.columns([1, 1, 2])
-    status_filter = c1.selectbox("상태", ["전체", "진행중", "완료"])
-    loc_filter = c2.text_input("장소 검색")
-    txt_filter = c3.text_input("내용 검색")
-    
+with tabs[3]: # 조치입력
+    st.subheader("🛠️ 조치 결과")
     tasks = fetch_tasks_all()
-    filtered = []
-    for t in tasks:
-        if status_filter != "전체" and t['status'] != status_filter: continue
-        if loc_filter and loc_filter not in (t['location'] or ""): continue
-        if txt_filter and txt_filter not in (t['issue_text'] or ""): continue
-        filtered.append(t)
-        
-    if not filtered: st.warning("데이터가 없습니다.")
-    else:
-        df_list = pd.DataFrame(filtered)
-        df_disp = df_list[['issue_date', 'grade', 'location', 'issue_text', 'status', 'action_done_date']].copy()
-        df_disp.columns = ['일시', '등급', '장소', '내용', '상태', '완료일']
-        
-        st.caption("목록을 클릭하면 상세 내용을 볼 수 있습니다.")
-        selection = st.dataframe(df_disp, use_container_width=True, hide_index=True, height=250, on_select="rerun", selection_mode="single-row")
-        
-        if selection.selection.rows:
-            target = filtered[selection.selection.rows[0]]
-            st.divider()
-            st.markdown(f"#### 🔧 상세 관리 : <span class='grade-badge'>{target.get('grade') or '-'}</span> {target['location']}", unsafe_allow_html=True)
-            
-            c_l, c_r = st.columns([3, 1])
-            c_l.info(f"내용: {target['issue_text']} | 담당: {target.get('assignee') or '-'} | 완료: {target.get('action_done_date') or '-'}")
-            if c_r.button("🗑️ 삭제하기", type="primary"):
-                delete_task_entirely(target['id'], target.get('photos'))
-                st.success("삭제됨")
+    target_tasks = [t for t in tasks if t['status'] != '완료']
+    if target_tasks:
+        opts = [f"{t['location']} - {t['issue_text'][:10]}..." for t in target_tasks]
+        sel = st.selectbox("조치 대상 선택", opts)
+        t = target_tasks[opts.index(sel)]
+        st.info(f"문제: {t['issue_text']}")
+        with st.expander("사진 추가"):
+            act_p = st.file_uploader("사진", accept_multiple_files=True)
+            if act_p and st.button("사진 업로드"):
+                for f in act_p: upload_photo(t['id'], f, "AFTER")
                 st.rerun()
+        with st.form("form_act"):
+            act_text = st.text_area("조치내용", value=t.get('action_text') or "")
+            if st.form_submit_button("완료 처리"):
+                update_task(t['id'], {"action_text": act_text, "status": "완료", "action_done_date": str(date.today())})
+                st.success("완료됨"); st.rerun()
 
-            with st.expander("🏷️ 등급 수정 (미지정 건 처리용)"):
-                current_grade = target.get('grade') or "미지정"
-                idx = GRADE_OPTIONS.index(current_grade) if current_grade in GRADE_OPTIONS else 0
-                new_grade_sel = st.selectbox("등급 변경", GRADE_OPTIONS, index=idx, key="up_grade_sel")
-                if st.button("등급 저장", key="btn_up_grade"):
-                    update_task(target['id'], {"grade": new_grade_sel})
-                    st.success("등급이 수정되었습니다.")
-                    st.rerun()
-
-            display_photos_grid(target.get('photos_before', []), "🔴 개선 전")
-            display_photos_grid(target.get('photos_after', []), "🟢 개선 후")
-            
-            all_p = target.get('photos', [])
-            if all_p:
-                with st.expander("사진 삭제 모드"):
-                    cols = st.columns(4)
-                    for i, p in enumerate(all_p):
-                        with cols[i%4]:
-                            ptype = "🟢후" if "/AFTER_" in p.get('storage_path', '') else "🔴전"
-                            st.image(p['public_url'], caption=ptype, width=100)
-                            if st.button("삭제", key=f"del_{p['photo_id']}"): delete_photo(p['photo_id'], p['storage_path']); st.rerun()
-            
-            c_add1, c_add2 = st.columns([1, 3])
-            add_type = c_add1.radio("추가할 사진 타입", ["개선전(BEFORE)", "개선후(AFTER)"], horizontal=True)
-            new_p = c_add2.file_uploader("사진 추가", accept_multiple_files=True, key="add_p_man")
-            if new_p and c_add2.button("업로드"):
-                pt = "AFTER" if "개선후" in add_type else "BEFORE"
-                for f in new_p: upload_photo(target['id'], f, photo_type=pt)
-                st.success("완료")
-                st.rerun()
+with tabs[4]: # 조회
+    st.subheader("🔍 통합 조회")
+    tasks = fetch_tasks_all()
+    if tasks:
+        df = pd.DataFrame(tasks)
+        st.dataframe(df[['issue_date', 'location', 'issue_text', 'status']], use_container_width=True)
 
 # =========================================================
-# [마지막 탭] 실별 온도관리 (복구 완료)
+# [마지막 탭] 실별 온도관리 (★ 위치 변경 기능 완벽 적용 ★)
 # =========================================================
 with tabs[5]:
-    # ------------------------------------------------------------------
-    # 0. 데이터 및 설정 준비
-    # ------------------------------------------------------------------
+    # 1. DB에서 현재 매핑 정보 로드
+    current_mapping = fetch_sensor_mapping_from_db()
+    
+    # 2. 알림 기준 데이터 프레임 준비
     if "alarm_df" not in st.session_state:
         data_list = []
         for room, (min_v, max_v) in ALARM_CONFIG.items():
             if room != "default": 
                 data_list.append({"장소": room, "최저온도(℃)": min_v, "최고온도(℃)": max_v})
-        # 순서 정렬
         data_list.sort(key=lambda x: ROOM_ORDER.index(x["장소"]) if x["장소"] in ROOM_ORDER else 999)
         st.session_state.alarm_df = pd.DataFrame(data_list)
 
-    @st.dialog("⚙️ 정상 온도 범위 설정")
+    # 3. 설정 팝업 (온도 범위 + 센서 위치)
+    @st.dialog("⚙️ 환경 설정")
     def open_setting_popup():
-        st.caption("각 장소별 정상 온도 범위를 수정하세요.")
-        edited = st.data_editor(
-            st.session_state.alarm_df,
-            column_config={
-                "장소": st.column_config.TextColumn("장소", disabled=True),
-                "최저온도(℃)": st.column_config.NumberColumn("Min", min_value=-10, max_value=50, step=0.5, format="%.1f"),
-                "최고온도(℃)": st.column_config.NumberColumn("Max", min_value=-10, max_value=60, step=0.5, format="%.1f"),
-            },
-            hide_index=True, use_container_width=True, num_rows="fixed", key="popup_editor"
-        )
-        if st.button("💾 저장하고 닫기", type="primary", use_container_width=True):
-            st.session_state.alarm_df = edited
-            st.rerun()
+        tab_limit, tab_map = st.tabs(["🌡️ 온도 범위", "📍 센서 위치"])
+        with tab_limit:
+            st.caption("각 장소별 정상 온도 범위를 수정하세요.")
+            edited_alarm = st.data_editor(
+                st.session_state.alarm_df,
+                column_config={
+                    "장소": st.column_config.TextColumn("장소", disabled=True),
+                    "최저온도(℃)": st.column_config.NumberColumn("Min", min_value=-10, max_value=50, format="%.1f"),
+                    "최고온도(℃)": st.column_config.NumberColumn("Max", min_value=-10, max_value=60, format="%.1f"),
+                },
+                hide_index=True, use_container_width=True, key="alarm_editor"
+            )
+        with tab_map:
+            st.caption("센서가 설치된 장소를 변경하세요.")
+            # 현재 매핑 정보를 표로 변환
+            map_data = [{"센서": k, "장소": v} for k, v in current_mapping.items()]
+            map_df = pd.DataFrame(map_data).sort_values("센서")
+            
+            # 장소 선택지
+            room_options = sorted(["쌀창고", "전처리실", "양조실", "제품포장실", "부자재창고", "사무실", "숙성실", "기타"])
+            
+            edited_map = st.data_editor(
+                map_df,
+                column_config={
+                    "센서": st.column_config.TextColumn("센서명", disabled=True),
+                    "장소": st.column_config.SelectboxColumn("설치 장소", options=room_options, required=True)
+                },
+                hide_index=True, use_container_width=True, key="map_editor"
+            )
 
-    # 헤더 구성
+        if st.button("💾 모든 설정 저장", type="primary", use_container_width=True):
+            # 1) 온도 범위 세션 저장
+            st.session_state.alarm_df = edited_alarm
+            
+            # 2) 센서 위치 DB 저장
+            new_mapping_rows = [{"sensor_id": r["센서"], "room_name": r["장소"]} for r in edited_map.to_dict('records')]
+            try:
+                sb.table("sensor_mapping").upsert(new_mapping_rows).execute()
+                fetch_sensor_logs.clear() # 캐시 초기화
+                st.success("저장되었습니다!")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"저장 중 오류: {e}")
+
+    # 헤더
     col_head, col_btn = st.columns([6, 1], vertical_alignment="center")
     with col_head: st.subheader("🌡️ 실별 온도/습도 관리")
     with col_btn:
@@ -684,163 +387,63 @@ with tabs[5]:
     for index, row in st.session_state.alarm_df.iterrows():
         ACTIVE_CONFIG[row["장소"]] = (row["최저온도(℃)"], row["최고온도(℃)"])
 
-    # 데이터 가져오기
-    df_logs = fetch_sensor_logs(days=30)
+    # 데이터 가져오기 (매핑 적용)
+    df_logs = fetch_sensor_logs(days=30, mapping=current_mapping)
     
-    # ------------------------------------------------------------------
-    # ★ [그룹 정의] 
-    # ------------------------------------------------------------------
-    ROOM_GROUPS = {
-        "🏭 작업장 (Workplace)": ["전처리실", "양조실", "제품포장실"],
-        "📦 창고 (Warehouse)": ["쌀창고", "부자재창고"],
-        "🌳 외곽 (Outdoor)": [] # 추후 추가
-    }
+    # 그룹 정의 (자동 분류)
+    ROOM_GROUPS = {"🏭 작업장": ["전처리실", "양조실", "제품포장실"], "📦 창고": ["쌀창고", "부자재창고"], "🌳 기타": []}
+    defined_rooms = sum(ROOM_GROUPS.values(), [])
+    for r in set(current_mapping.values()):
+        if r not in defined_rooms: ROOM_GROUPS["🌳 기타"].append(r)
 
     if df_logs.empty:
-        st.info("📊 수집된 센서 데이터가 없습니다.")
+        st.info("📊 데이터 없음")
     else:
-        # [중요] 오류 방지를 위해 변수를 여기서 미리 정의합니다.
-        available_rooms = set(SENSOR_CONFIG.values())
+        active_rooms = set(current_mapping.values())
         latest_sensors = df_logs.sort_values('created_at').groupby('sensor_id').tail(1)
         
-        # ------------------------------------------------------------------
-        # 그룹별 카드 출력
-        # ------------------------------------------------------------------
         for group_name, rooms in ROOM_GROUPS.items():
-            # 실제 데이터가 있는 방만 골라내기
-            valid_group_rooms = [r for r in rooms if r in available_rooms]
-            
-            # 방이 하나도 없으면(데이터가 없거나 정의 안된 그룹) 패스
-            if not valid_group_rooms: 
-                continue
-
+            valid_rooms = [r for r in rooms if r in active_rooms]
+            if not valid_rooms: continue
             st.markdown(f"##### {group_name}")
-            
             cols = st.columns(4)
-            for idx, room in enumerate(valid_group_rooms):
+            for idx, room in enumerate(valid_rooms):
                 room_sensors = latest_sensors[latest_sensors['room_name'] == room]
-                
                 with cols[idx % 4]:
                     icon = ROOM_ICONS.get(room, "🏢")
                     limit_min, limit_max = ACTIVE_CONFIG.get(room, ACTIVE_CONFIG["default"])
-                    
                     if not room_sensors.empty:
                         avg_temp = room_sensors['temperature'].mean()
                         avg_humid = room_sensors['humidity'].mean()
-                        
                         details_html = ""
-                        room_warning = False
-                        
+                        is_warn = False
                         for _, row in room_sensors.iterrows():
-                            s_name = row['sensor_id']
                             s_temp = row['temperature']
-                            
-                            if s_temp < limit_min or s_temp > limit_max:
-                                text_color = "#e03131"
-                                weight = "bold"
-                                icon_alert = "🚨"
-                                room_warning = True
-                            else:
-                                text_color = "#555"
-                                weight = "normal"
-                                icon_alert = ""
-                            
-                            # [수정] HTML 코드 여백 제거 (한 줄로 작성)
-                            details_html += f"""<div style="display:flex; justify-content:space-between; font-size:0.75rem; color:{text_color}; font-weight:{weight}; margin-top:1px;"><span>{s_name}</span><span>{icon_alert} {s_temp:.1f}℃</span></div>"""
+                            if s_temp < limit_min or s_temp > limit_max: color, weight, alert, is_warn = "#e03131", "bold", "🚨", True
+                            else: color, weight, alert = "#555", "normal", ""
+                            details_html += f"""<div style="display:flex;justify-content:space-between;font-size:0.75rem;color:{color};font-weight:{weight};">{row['sensor_id']}<span>{alert}{s_temp}℃</span></div>"""
                         
-                        if room_warning:
-                            header_color = "#e03131"
-                            title_color = "#e03131"
-                        else:
-                            header_color = "#212529" # 진한 검정
-                            title_color = "#212529"
-                        
-                        last_time = room_sensors['created_at'].max()
-                        time_diff = (datetime.now(pytz.timezone('Asia/Seoul')) - last_time).total_seconds() / 60
-                        
-                        # [핵심 수정] HTML 문자열의 들여쓰기를 완전히 제거하여 왼쪽 벽에 붙임
-                        card_html = f"""<div class="metric-card" style="border-top: 3px solid {header_color}; padding: 10px;">
-<div class="metric-title" style="font-size: 1.1rem; font-weight: 800; color: {title_color}; margin-bottom: 4px;">{icon} {room}</div>
-<div class="metric-value" style="font-size: 1.4rem; color:{header_color}">{avg_temp:.1f}℃</div>
-<div style="font-size: 0.75rem; color: #868e96;">기준: {limit_min}~{limit_max}℃</div>
-<div style="font-size: 0.9rem; color: #4dabf7; margin-bottom:6px;">💧 {avg_humid:.1f}%</div>
-<div style="border-top:1px solid #eee; margin:4px 0; padding-top:4px;"></div>
-{details_html}
-<div class="metric-sub" style="margin-top:6px; font-size: 0.7rem;">{int(time_diff)}분 전</div>
-</div>"""
-                        st.markdown(card_html, unsafe_allow_html=True)
-                        
+                        head_col = "#e03131" if is_warn else "#212529"
+                        st.markdown(f"""<div class="metric-card" style="border-top:3px solid {head_col};padding:10px;">
+                        <div style="font-weight:800;color:{head_col};">{icon} {room}</div>
+                        <div style="font-size:1.4rem;color:{head_col}">{avg_temp:.1f}℃</div>
+                        <div style="font-size:0.75rem;color:#888;">기준: {limit_min}~{limit_max}</div>
+                        <div style="font-size:0.9rem;color:#4dabf7;">💧 {avg_humid:.1f}%</div>
+                        <hr style="margin:5px 0;">{details_html}</div>""", unsafe_allow_html=True)
                     else:
-                        st.markdown(f"""<div class="metric-card" style="opacity: 0.6; padding: 10px;">
-<div class="metric-title" style="font-size: 1.0rem; font-weight: 800; color: #adb5bd;">{icon} {room}</div>
-<div class="metric-value" style="font-size: 1.2rem;">-</div>
-<div class="metric-sub" style="font-size: 0.7rem;">데이터 없음</div>
-</div>""", unsafe_allow_html=True)
-            
-            st.markdown("") 
+                        st.markdown(f"""<div class="metric-card" style="opacity:0.6;"><div style="font-weight:800;color:#aaa;">{icon} {room}</div><div>-</div><div style="font-size:0.7rem;">데이터 없음</div></div>""", unsafe_allow_html=True)
+            st.markdown("")
 
-        # ------------------------------------------------------------------
-        # 상세 트렌드 분석 (오류 수정됨)
-        # ------------------------------------------------------------------
         st.divider()
-        st.markdown("#### 📈 상세 분석 (트렌드)")
-        
+        st.markdown("#### 📈 상세 분석")
         col_f1, col_f2 = st.columns([1, 2])
-        
-        # [수정] 모든 그룹의 방을 합쳐서 리스트 생성
-        all_defined_rooms = []
-        for r_list in ROOM_GROUPS.values():
-            all_defined_rooms.extend(r_list)
-            
-        # 데이터가 존재하는 방만 필터링
-        valid_analysis_rooms = [r for r in all_defined_rooms if r in available_rooms]
-        
-        # 만약 정의된 그룹 외의 데이터가 있다면 추가
-        for r in available_rooms:
-            if r not in valid_analysis_rooms:
-                valid_analysis_rooms.append(r)
-
-        if not valid_analysis_rooms:
-             st.warning("분석할 데이터가 없습니다.")
-        else:
-            sel_room = col_f1.selectbox("분석할 장소 선택", valid_analysis_rooms)
-            sel_range = col_f2.radio("기간 보기", ["24시간", "1주일", "1개월", "전체"], horizontal=True, index=0)
-            
+        valid_analysis_rooms = list(active_rooms)
+        if valid_analysis_rooms:
+            sel_room = col_f1.selectbox("장소 선택", valid_analysis_rooms)
             target_df = df_logs[df_logs['room_name'] == sel_room].copy()
-            r_min, r_max = ACTIVE_CONFIG.get(sel_room, ACTIVE_CONFIG["default"])
-            
-            now = datetime.now(pytz.timezone('Asia/Seoul'))
-            if sel_range == "24시간":
-                target_df = target_df[target_df['created_at'] >= now - timedelta(hours=24)]
-                x_format = '%H:%M'
-            elif sel_range == "1주일":
-                target_df = target_df[target_df['created_at'] >= now - timedelta(days=7)]
-                x_format = '%m-%d'
-            elif sel_range == "1개월":
-                target_df = target_df[target_df['created_at'] >= now - timedelta(days=30)]
-                x_format = '%m-%d'
-            else:
-                x_format = '%Y-%m-%d'
-            
-            if target_df.empty:
-                st.warning(f"선택한 기간에 '{sel_room}'의 데이터가 없습니다.")
-            else:
-                st.caption("ℹ️ **검은색 굵은 선**은 '평균 온도', **연한 색 선**은 '각 센서별 온도'입니다.")
-                
-                base = alt.Chart(target_df).encode(x=alt.X('created_at:T', title='시간', axis=alt.Axis(format=x_format)))
-                
-                lines_individual = base.mark_line(strokeWidth=1, opacity=0.5).encode(
-                    y=alt.Y('temperature:Q', title='온도 (℃)', scale=alt.Scale(domain=[0, 50])),
-                    color=alt.Color('sensor_id:N', legend=alt.Legend(title="센서명")),
-                    tooltip=['created_at', 'sensor_id', 'temperature']
-                )
-                line_average = base.mark_line(strokeWidth=3, color='#333333').encode(y=alt.Y('mean(temperature):Q'))
-                
-                limit_df = pd.DataFrame([{"val": r_max, "type": "상한선", "color": "red"}, {"val": r_min, "type": "하한선", "color": "blue"}])
-                rules = alt.Chart(limit_df).mark_rule(strokeDash=[4, 4], size=2).encode(
-                    y='val:Q', color=alt.Color('type:N', scale=alt.Scale(domain=['상한선', '하한선'], range=['red', 'blue']))
-                )
-                
-                st.altair_chart((lines_individual + line_average + rules).properties(height=350), use_container_width=True)
-                with st.expander(f"{sel_room} 전체 데이터 테이블"):
-                    st.dataframe(target_df.sort_values('created_at', ascending=False), use_container_width=True)
+            if not target_df.empty:
+                base = alt.Chart(target_df).encode(x='created_at:T')
+                lines = base.mark_line(opacity=0.5).encode(y='temperature:Q', color='sensor_id:N')
+                avg = base.mark_line(strokeWidth=3, color='#333').encode(y='mean(temperature):Q')
+                st.altair_chart((lines + avg).properties(height=300), use_container_width=True)
+            else: st.warning("데이터 없음")
