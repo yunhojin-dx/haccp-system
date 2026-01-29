@@ -16,13 +16,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# 알림 기준 (정상 범위)
-ALARM_CONFIG = {
-    "부자재창고": (0.0, 40.0), # 10호기 보정
-    "default": (0.0, 35.0)
-}
-
-SENSORS = [
+# 기본 센서 목록 (DB 연결 실패 시 사용 + ID 정보 포함)
+# ★ 이름(name)과 ID(id)는 고정, 장소(place)는 DB에서 불러와서 덮어씀
+SENSORS_BASE = [
     {"name": "1호기", "id": "ebb5a8087eed5151f182k1", "place": "쌀창고"},
     {"name": "2호기", "id": "ebef0c9ce87b7e7929baam", "place": "전처리실"},
     {"name": "3호기", "id": "eb6b6b314e849b6078juue", "place": "전처리실"},
@@ -35,6 +31,12 @@ SENSORS = [
     {"name": "10호기", "id": "ebef6f23e7c1071a83njws", "place": "부자재창고"},
 ]
 
+# 알림 기준 (기본값)
+ALARM_CONFIG = {
+    "부자재창고": (0.0, 40.0), # 10호기 보정 감안
+    "default": (0.0, 35.0)
+}
+
 def send_discord_alert(message):
     if not DISCORD_WEBHOOK_URL: return
     try:
@@ -45,9 +47,9 @@ def send_discord_alert(message):
     except: pass
 
 # =======================================================
-# [2] 메인 로직 (웹/서버 전용 - 화면 없음)
+# [2] 메인 로직
 # =======================================================
-print("🏭 [GitHub Action] 센서 수집 및 10호기 보정 시작...")
+print("🏭 [GitHub Action] 센서 수집 시작 (DB 위치 연동)...")
 
 try:
     if not API_KEY or not SUPABASE_URL:
@@ -56,13 +58,25 @@ try:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     cloud = tinytuya.Cloud(apiRegion=REGION, apiKey=API_KEY, apiSecret=API_SECRET)
     
+    # 1. DB에서 최신 위치 정보 가져오기
+    mapping = {}
+    try:
+        res = supabase.table("sensor_mapping").select("*").execute()
+        if res.data:
+            mapping = {item['sensor_id']: item['room_name'] for item in res.data}
+            print("✅ 최신 위치 정보를 DB에서 가져왔습니다.")
+    except Exception as e:
+        print(f"⚠️ 위치 정보 로드 실패 (기본값 사용): {e}")
+
     kst = pytz.timezone('Asia/Seoul')
     now_str = datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S%z")
-    
     alert_messages = []
     
-    for sensor in SENSORS:
-        # 1. Tuya 클라우드에서 데이터 가져오기
+    for sensor in SENSORS_BASE:
+        # DB에 설정된 위치가 있으면 그걸 쓰고, 없으면 기본값 사용
+        current_place = mapping.get(sensor['name'], sensor['place'])
+        
+        # Tuya 데이터 수집
         uri = f'/v1.0/devices/{sensor["id"]}/status'
         res = cloud.cloudrequest(uri)
         
@@ -73,45 +87,38 @@ try:
             for item in res['result']:
                 if item['code'] == 'temp_current':
                     val = float(item['value'])
-                    # ★ [10호기 겨울철 버그 수정] 
-                    # 40(4.0도)보다 크면 10으로 나눔. 
-                    # (예: 85가 들어오면 8.5도로 변환, 255는 25.5도로 변환)
+                    # ★ [10호기 겨울철 버그 수정] 4.0도(40) 이상이면 10으로 나눔
                     temp = val / 10.0 if val > 40 else val
-                    
                 elif item['code'] == 'humidity_value':
                     val = float(item['value'])
                     humid = val / 10.0 if val > 100 else val
         
         if temp != -999:
-            place = sensor['place']
-            min_v, max_v = ALARM_CONFIG.get(place, ALARM_CONFIG["default"])
+            min_v, max_v = ALARM_CONFIG.get(current_place, ALARM_CONFIG["default"])
             
-            # 2. 상태 판단
+            # 상태 판단
             current_status = "비정상" if (temp < min_v or temp > max_v) else "정상"
             
-            # 3. DB 저장
+            # DB 저장 (업데이트된 장소 이름으로 저장)
             supabase.table("sensor_logs").insert({
                 "place": sensor['name'], 
                 "temperature": temp, 
                 "humidity": humid,
                 "status": current_status, 
                 "created_at": now_str, 
-                "room_name": place
+                "room_name": current_place
             }).execute()
 
-            # 4. 스마트 알림 (이전 상태 비교)
+            # 스마트 알림
             last_log = supabase.table("sensor_logs").select("status").eq("place", sensor['name']).order("created_at", desc=True).limit(1).execute()
             prev_status = "정상"
             if last_log.data: prev_status = last_log.data[0]['status']
 
             if current_status == "비정상" and prev_status != "비정상":
-                alert_messages.append(f"🔥 **{place} 온도 이탈!** ({temp}℃)")
-                print(f"🚨 {place} 경보 발생")
+                alert_messages.append(f"🔥 **{current_place} ({sensor['name']}) 온도 이탈!** ({temp}℃)")
             elif current_status == "정상" and prev_status == "비정상":
-                alert_messages.append(f"✅ **{place} 온도 복구** ({temp}℃)")
-                print(f"✅ {place} 복구 완료")
+                alert_messages.append(f"✅ **{current_place} ({sensor['name']}) 온도 복구** ({temp}℃)")
 
-    # 5. 메시지 전송
     if alert_messages:
         send_discord_alert("## 📢 천안공장 상황 알림\n" + "\n".join(alert_messages))
     else:
